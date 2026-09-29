@@ -2,7 +2,7 @@
 id: SPEC-0002
 title: Create a named parameter from an Excel range
 issue: ISSUE-0002
-status: draft
+status: implemented
 created: 2026-09-29
 ---
 
@@ -82,3 +82,16 @@ All handles follow the pattern `cvx:<kind>:<uuid>`, where `<kind>` for parameter
 4. Implement `excel::parameter` as the exported XLL function.
 5. Register the function in the XLL entry point with `xladd`.
 6. Add `#[cfg(test)]` unit tests for registry and parsing logic.
+
+## Status
+
+Implemented. `CVX.PARAMETER` is registered in `src/excel/mod.rs` (`xlAutoOpen`) and
+exported as `src/excel/parameter.rs::cvx_parameter`. Range parsing lives in
+`src/data/mod.rs` (row-major storage, blank cells treated as zero). The
+thread-safe registry, content hashing/caching, handle formatting, and parsing
+live in `src/core/registry.rs` and `src/core/handle.rs`. Diagnostics are logged
+via `tracing` to `%TEMP%/cvxx.log` (see `src/logging.rs`); Excel only ever sees
+`#VALUE!`. 13 unit tests cover the registry, handle round-tripping, and range
+parsing; `cargo fmt` and `cargo clippy --all-targets` are clean. Integration
+testing against a live Excel workbook is still pending and requires a Windows
+machine with Excel installed.

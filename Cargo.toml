@@ -1,0 +1,18 @@
+[package]
+name = "cvxx"
+version = "0.1.0"
+edition = "2021"
+description = "Excel add-in exposing cvxrust convex optimization via a Rust XLL"
+license = "GPL-3.0-only"
+authors = ["cvxx contributors"]
+
+[lib]
+name = "cvxx"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+xladd = "0.1.2"
+uuid = { version = "1", features = ["v4"] }
+thiserror = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["fmt"] }
