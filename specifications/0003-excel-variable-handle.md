@@ -2,7 +2,7 @@
 id: SPEC-0003
 title: Create named optimization variables from Excel
 issue: ISSUE-0003
-status: draft
+status: implemented
 created: 2026-09-29
 ---
 
@@ -84,3 +84,17 @@ All handles follow the pattern `cvx:<kind>:<uuid>`, where `<kind>` for variables
 4. Construct the `cvxrust` variable with the validated shape and store it in the registry.
 5. Register `CVX.VARIABLE` in the XLL entry point with `xladd`.
 6. Add `#[cfg(test)]` unit tests for registry and shape validation logic.
+
+## Status
+
+Implemented. `CVX.VARIABLE` is registered in `src/excel/mod.rs` (`xlAutoOpen`)
+and exported as `src/excel/variable.rs::cvx_variable`. Shape validation and
+dimension parsing live in `src/data/mod.rs` (`parse_dimension`, `MAX_DIMENSION`
+= 1,000,000). The variable placeholder type lives in
+`src/core/variable.rs::Variable`; registry insertion and lookup live in
+`src/core/registry.rs::VariableEntry`. The handle kind `var` is supported in
+`src/core/handle.rs`. User documentation is in `docs/variables.md`. 11 new unit
+tests cover variable registry operations and dimension validation; `cargo fmt`
+and `cargo clippy --all-targets` are clean. Integration testing against a live
+Excel workbook is still pending and requires a Windows machine with Excel
+installed.

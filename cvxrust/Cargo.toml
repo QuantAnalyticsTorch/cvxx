@@ -1,0 +1,11 @@
+[package]
+name = "cvxrust"
+version = "0.1.0"
+edition = "2021"
+description = "Placeholder convex optimization modeling layer for cvxx"
+license = "GPL-3.0-only"
+authors = ["cvxx contributors"]
+
+[lib]
+name = "cvxrust"
+crate-type = ["rlib"]

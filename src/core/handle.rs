@@ -7,12 +7,16 @@ use crate::core::error::CvxError;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HandleKind {
     Param,
+    Var,
+    Expr,
 }
 
 impl HandleKind {
     fn as_str(self) -> &'static str {
         match self {
             HandleKind::Param => "param",
+            HandleKind::Var => "var",
+            HandleKind::Expr => "expr",
         }
     }
 }
@@ -36,6 +40,8 @@ pub fn parse_handle(handle: &str) -> Result<(HandleKind, Uuid), CvxError> {
 
     let kind = match kind {
         "param" => HandleKind::Param,
+        "var" => HandleKind::Var,
+        "expr" => HandleKind::Expr,
         _ => return Err(CvxError::InvalidHandle(handle.to_string())),
     };
 
@@ -55,8 +61,22 @@ mod tests {
     }
 
     #[test]
+    fn round_trips_a_variable_handle() {
+        let id = Uuid::new_v4();
+        let handle = format_handle(HandleKind::Var, id);
+        assert_eq!(parse_handle(&handle).unwrap(), (HandleKind::Var, id));
+    }
+
+    #[test]
+    fn round_trips_an_expression_handle() {
+        let id = Uuid::new_v4();
+        let handle = format_handle(HandleKind::Expr, id);
+        assert_eq!(parse_handle(&handle).unwrap(), (HandleKind::Expr, id));
+    }
+
+    #[test]
     fn rejects_unknown_kind() {
-        let handle = format!("cvx:var:{}", Uuid::new_v4());
+        let handle = format!("cvx:unknown:{}", Uuid::new_v4());
         assert_eq!(parse_handle(&handle), Err(CvxError::InvalidHandle(handle)));
     }
 

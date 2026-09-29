@@ -5,9 +5,12 @@
 //!
 //! - [`core`] — handle registry, opaque identifiers, and shared error types.
 //! - [`data`] — Excel range parsing and normalization into Rust types.
+//! - [`analytics`] — expression AST, parser, and conversion to `cvxrust`
+//!   expressions.
 //! - [`excel`] — XLL registration and `XLOPER12` adapters (the only module
 //!   that speaks Excel).
 
+pub mod analytics;
 pub mod core;
 pub mod data;
 pub mod excel;

@@ -1,3 +1,7 @@
+[workspace]
+members = [".", "cvxrust"]
+resolver = "2"
+
 [package]
 name = "cvxx"
 version = "0.1.0"
@@ -10,7 +14,14 @@ authors = ["cvxx contributors"]
 name = "cvxx"
 crate-type = ["cdylib", "rlib"]
 
+[profile.dev]
+opt-level = 3
+debug = false
+lto = false
+codegen-units = 16
+
 [dependencies]
+cvxrust = { path = "cvxrust" }
 xladd = "0.1.2"
 uuid = { version = "1", features = ["v4"] }
 thiserror = "1"

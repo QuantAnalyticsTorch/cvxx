@@ -27,7 +27,7 @@ fn run(range: LPXLOPER12, name: LPXLOPER12) -> Result<String, CvxError> {
     let name = Variant::from_xloper(name);
 
     let parsed = data::parse_range(&range)?;
-    let name = name.as_string().filter(|s| !s.trim().is_empty());
+    let name = data::parse_optional_name(&name)?;
 
     Registry::global().insert_parameter(name, parsed.shape, parsed.data)
 }

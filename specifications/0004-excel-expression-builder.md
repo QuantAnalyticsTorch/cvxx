@@ -2,7 +2,7 @@
 id: SPEC-0004
 title: Build optimization expressions from Excel formulas
 issue: ISSUE-0004
-status: draft
+status: implemented
 created: 2026-09-29
 ---
 
@@ -132,3 +132,20 @@ All handles follow the pattern `cvx:<kind>:<uuid>`, where `<kind>` for expressio
 5. Keep expressions lazy: parsing produces an AST or a `cvxrust` expression object, but no numeric values are substituted.
 6. Register all expression functions in the XLL entry point with `xladd`.
 7. Add `#[cfg(test)]` unit tests for parser, name resolution, functional builders, and registry behavior.
+
+## Status
+
+Implemented. Added `cvxrust` as a workspace member crate under `cvxrust/`
+and wired it into `cvxx` as a path dependency. `CVX.EXPRESSION`, `CVX.ADD`,
+`CVX.SUB`, `CVX.MUL`, `CVX.DIV`, `CVX.NEG`, and `CVX.SCALE` are registered in
+`src/excel/mod.rs` (`xlAutoOpen`) and exported from
+`src/excel/expression.rs`. The expression AST, recursive-descent parser, and
+registry name resolver live in `src/analytics/ast.rs`,
+`src/analytics/parser.rs`, and `src/analytics/resolve.rs`. Expression entries
+(`ExpressionEntry`) are stored in `src/core/registry.rs` with dependency
+tracking and lookup by UUID/name. `HandleKind::Expr` is supported in
+`src/core/handle.rs`. User documentation is in `docs/expressions.md`. 45 unit
+tests cover parsing, resolution, registry behavior, and handle resolution;
+`cargo fmt` and `cargo clippy --all-targets` are clean. Integration testing
+against a live Excel workbook is still pending and requires a Windows machine
+with Excel installed.

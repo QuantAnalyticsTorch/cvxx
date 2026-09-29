@@ -1,0 +1,209 @@
+//! Name resolution: convert the user AST into a `cvxrust::Expression` by
+//! looking up identifiers in the registry.
+
+use std::collections::HashSet;
+
+use crate::analytics::ast::{Expr, ExprNode};
+use crate::core::error::CvxError;
+use crate::core::handle::{parse_handle, HandleKind};
+use crate::core::registry::Registry;
+use cvxrust::Expression;
+
+/// A resolved expression together with the registry handles it depends on.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ResolvedExpr {
+    pub expression: Expression,
+    pub dependencies: Vec<String>,
+}
+
+/// Resolves an AST against the registry. Identifiers may be:
+/// - names of registered parameters, variables, or expressions;
+/// - literal handles of the form `cvx:<kind>:<uuid>`.
+///
+/// Numeric constants are left as constants. Named expressions referenced by
+/// name are inlined (their AST is resolved recursively), but their handles
+/// are recorded as dependencies.
+pub fn resolve_expr(registry: &Registry, ast: &ExprNode) -> Result<ResolvedExpr, CvxError> {
+    let mut resolver = Resolver::new(registry);
+    let expression = resolver.resolve(ast)?;
+    let dependencies = resolver.dependencies.into_iter().collect();
+    Ok(ResolvedExpr {
+        expression,
+        dependencies,
+    })
+}
+
+struct Resolver<'a> {
+    registry: &'a Registry,
+    dependencies: HashSet<String>,
+}
+
+impl<'a> Resolver<'a> {
+    fn new(registry: &'a Registry) -> Self {
+        Resolver {
+            registry,
+            dependencies: HashSet::new(),
+        }
+    }
+
+    fn resolve(&mut self, node: &ExprNode) -> Result<Expression, CvxError> {
+        match node.as_ref() {
+            Expr::Constant(value) => Ok(Expression::constant(*value)),
+            Expr::Identifier(name) => self.resolve_identifier(name),
+            Expr::Add(left, right) => {
+                let l = self.resolve(left)?;
+                let r = self.resolve(right)?;
+                Ok(Expression::add(l, r))
+            }
+            Expr::Sub(left, right) => {
+                let l = self.resolve(left)?;
+                let r = self.resolve(right)?;
+                Ok(Expression::sub(l, r))
+            }
+            Expr::Mul(left, right) => {
+                let l = self.resolve(left)?;
+                let r = self.resolve(right)?;
+                Ok(Expression::mul(l, r))
+            }
+            Expr::Div(left, right) => {
+                let l = self.resolve(left)?;
+                let r = self.resolve(right)?;
+                Ok(Expression::div(l, r))
+            }
+            Expr::Neg(operand) => {
+                let expr = self.resolve(operand)?;
+                Ok(Expression::neg(expr))
+            }
+        }
+    }
+
+    fn resolve_identifier(&mut self, name: &str) -> Result<Expression, CvxError> {
+        // If the identifier looks like a handle, try to parse it first.
+        if name.starts_with("cvx:") {
+            return self.resolve_handle(name);
+        }
+
+        // Otherwise look up by name in parameter, variable, then expression
+        // tables.
+        if let Some(entry) = self.registry.get_parameter_by_name(name) {
+            self.dependencies.insert(name.to_string());
+            return Ok(Expression::from_parameter(entry.shape, entry.data));
+        }
+
+        if let Some(entry) = self.registry.get_variable_by_name(name) {
+            self.dependencies.insert(name.to_string());
+            return Ok(Expression::from_variable(entry.variable));
+        }
+
+        if let Some(entry) = self.registry.get_expression_by_name(name) {
+            self.dependencies.insert(name.to_string());
+            return Ok(entry.expression);
+        }
+
+        Err(CvxError::UnknownIdentifier(name.to_string()))
+    }
+
+    fn resolve_handle(&mut self, handle: &str) -> Result<Expression, CvxError> {
+        let (kind, uuid) = parse_handle(handle)?;
+        match kind {
+            HandleKind::Param => {
+                let entry = self
+                    .registry
+                    .get_parameter_by_uuid(uuid)
+                    .ok_or_else(|| CvxError::UnknownIdentifier(handle.to_string()))?;
+                self.dependencies.insert(handle.to_string());
+                Ok(Expression::from_parameter(entry.shape, entry.data))
+            }
+            HandleKind::Var => {
+                let entry = self
+                    .registry
+                    .get_variable_by_uuid(uuid)
+                    .ok_or_else(|| CvxError::UnknownIdentifier(handle.to_string()))?;
+                self.dependencies.insert(handle.to_string());
+                Ok(Expression::from_variable(entry.variable))
+            }
+            HandleKind::Expr => {
+                let entry = self
+                    .registry
+                    .get_expression_by_uuid(uuid)
+                    .ok_or_else(|| CvxError::UnknownIdentifier(handle.to_string()))?;
+                self.dependencies.insert(handle.to_string());
+                Ok(entry.expression)
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::analytics::parser::parse;
+
+    #[test]
+    fn resolves_parameter_by_name() {
+        let registry = Registry::new();
+        registry
+            .insert_parameter(Some("A".to_string()), (1, 1), vec![2.0])
+            .unwrap();
+
+        let ast = parse("A").unwrap();
+        let resolved = resolve_expr(&registry, &ast).unwrap();
+
+        assert_eq!(
+            resolved.expression,
+            Expression::from_parameter((1, 1), vec![2.0])
+        );
+        assert_eq!(resolved.dependencies, vec!["A".to_string()]);
+    }
+
+    #[test]
+    fn resolves_variable_by_name() {
+        let registry = Registry::new();
+        registry
+            .insert_variable(Some("x".to_string()), (3, 1))
+            .unwrap();
+
+        let ast = parse("x").unwrap();
+        let resolved = resolve_expr(&registry, &ast).unwrap();
+
+        assert_eq!(
+            resolved.expression,
+            Expression::from_variable(crate::core::Variable::new((3, 1)))
+        );
+    }
+
+    #[test]
+    fn resolves_arithmetic_expression() {
+        let registry = Registry::new();
+        registry
+            .insert_parameter(Some("A".to_string()), (1, 1), vec![1.0])
+            .unwrap();
+        registry
+            .insert_variable(Some("x".to_string()), (1, 1))
+            .unwrap();
+
+        let ast = parse("2.5 * (A - x)").unwrap();
+        let resolved = resolve_expr(&registry, &ast).unwrap();
+
+        assert_eq!(
+            resolved.expression,
+            Expression::mul(
+                Expression::constant(2.5),
+                Expression::sub(
+                    Expression::from_parameter((1, 1), vec![1.0]),
+                    Expression::from_variable(crate::core::Variable::new((1, 1)))
+                )
+            )
+        );
+    }
+
+    #[test]
+    fn rejects_unknown_identifier() {
+        let registry = Registry::new();
+        let ast = parse("foo").unwrap();
+        assert_eq!(
+            resolve_expr(&registry, &ast).unwrap_err(),
+            CvxError::UnknownIdentifier("foo".to_string())
+        );
+    }
+}
