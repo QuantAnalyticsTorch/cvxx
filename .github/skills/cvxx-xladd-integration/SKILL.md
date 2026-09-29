@@ -16,6 +16,8 @@ Describe how to integrate with Excel using `xladd` and the `XLOPER12` C API.
    - Register each function with a unique Excel name, typically prefixed `CVX.`.
    - Declare argument types and return types accurately.
    - Provide help text for the function wizard.
+   - Observe Excel's 255-character limit for the function help string and for each argument description. Keep descriptions concise; put detailed documentation in `docs/` and `rustdoc`, not in the registration strings.
+   - Validate the length of every help string and argument description at build or test time to avoid silent truncation in Excel.
 
 2. **Argument handling**
    - Convert `XLOPER12` inputs to Rust types as early as possible.
