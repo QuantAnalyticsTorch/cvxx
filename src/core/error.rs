@@ -23,4 +23,6 @@ pub enum CvxError {
     UnknownIdentifier(String),
     #[error("registry error: {0}")]
     Registry(String),
+    #[error("solver failed: {0}")]
+    SolveFailed(String),
 }

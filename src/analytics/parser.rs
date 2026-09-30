@@ -13,7 +13,7 @@
 //!               start with a digit or dot
 //! ```
 
-use crate::analytics::ast::{Expr, ExprNode};
+use crate::analytics::ast::{Constraint, Expr, ExprNode, Relation};
 use crate::core::error::CvxError;
 
 /// Parses an expression string into an AST.
@@ -23,6 +23,20 @@ pub fn parse(input: &str) -> Result<ExprNode, CvxError> {
     let expr = parser.parse_expr()?;
     parser.expect_eof()?;
     Ok(expr)
+}
+
+/// Parses a constraint string of the form `expr relop expr`, where `relop`
+/// is `<=`, `>=`, or `==`. Exactly one top-level relational operator is
+/// allowed; operators nested in parentheses or appearing more than once are
+/// rejected.
+pub fn parse_constraint(input: &str) -> Result<Constraint, CvxError> {
+    let tokens = tokenize(input)?;
+    let mut parser = Parser::new(&tokens);
+    let lhs = parser.parse_expr()?;
+    let relation = parser.expect_relation()?;
+    let rhs = parser.parse_expr()?;
+    parser.expect_eof()?;
+    Ok(Constraint { relation, lhs, rhs })
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -35,6 +49,9 @@ enum Token {
     Slash,
     LParen,
     RParen,
+    Le,
+    Ge,
+    EqEq,
 }
 
 fn tokenize(input: &str) -> Result<Vec<Token>, CvxError> {
@@ -74,6 +91,18 @@ fn tokenize(input: &str) -> Result<Vec<Token>, CvxError> {
             ')' => {
                 tokens.push(Token::RParen);
                 i += 1;
+            }
+            '<' if chars.get(i + 1) == Some(&'=') => {
+                tokens.push(Token::Le);
+                i += 2;
+            }
+            '>' if chars.get(i + 1) == Some(&'=') => {
+                tokens.push(Token::Ge);
+                i += 2;
+            }
+            '=' if chars.get(i + 1) == Some(&'=') => {
+                tokens.push(Token::EqEq);
+                i += 2;
             }
             _ if c.is_ascii_digit() || c == '.' => {
                 let start = i;
@@ -160,6 +189,17 @@ impl<'a> Parser<'a> {
             ));
         }
         Ok(())
+    }
+
+    fn expect_relation(&mut self) -> Result<Relation, CvxError> {
+        match self.advance() {
+            Some(Token::Le) => Ok(Relation::LessEqual),
+            Some(Token::Ge) => Ok(Relation::GreaterEqual),
+            Some(Token::EqEq) => Ok(Relation::Equal),
+            _ => Err(CvxError::InvalidExpression(
+                "expected '<=', '>=', or '==' relational operator".to_string(),
+            )),
+        }
     }
 
     fn parse_expr(&mut self) -> Result<ExprNode, CvxError> {
@@ -311,5 +351,54 @@ mod tests {
     #[test]
     fn rejects_empty_expression() {
         assert!(parse("").is_err());
+    }
+
+    #[test]
+    fn parses_less_equal_constraint() {
+        let constraint = parse_constraint("x + y <= 10").unwrap();
+        assert_eq!(constraint.relation, Relation::LessEqual);
+        assert_eq!(constraint.lhs, Expr::Add(ident("x"), ident("y")).node());
+        assert_eq!(constraint.rhs, constant(10.0));
+    }
+
+    #[test]
+    fn parses_greater_equal_constraint() {
+        let constraint = parse_constraint("profit >= cost * 1.1").unwrap();
+        assert_eq!(constraint.relation, Relation::GreaterEqual);
+        assert_eq!(constraint.lhs, ident("profit"));
+        assert_eq!(
+            constraint.rhs,
+            Expr::Mul(ident("cost"), constant(1.1)).node()
+        );
+    }
+
+    #[test]
+    fn parses_equal_constraint() {
+        let constraint = parse_constraint("A == b").unwrap();
+        assert_eq!(constraint.relation, Relation::Equal);
+        assert_eq!(constraint.lhs, ident("A"));
+        assert_eq!(constraint.rhs, ident("b"));
+    }
+
+    #[test]
+    fn rejects_constraint_with_missing_operator() {
+        assert!(parse_constraint("x + y").is_err());
+    }
+
+    #[test]
+    fn rejects_constraint_with_multiple_operators() {
+        assert!(parse_constraint("x <= y <= z").is_err());
+    }
+
+    #[test]
+    fn rejects_constraint_with_operator_in_parentheses() {
+        assert!(parse_constraint("(x <= y)").is_err());
+    }
+
+    #[test]
+    fn rejects_single_relational_characters() {
+        assert!(parse_constraint("x < y").is_err());
+        assert!(parse_constraint("x > y").is_err());
+        assert!(parse_constraint("x = y").is_err());
     }
 }

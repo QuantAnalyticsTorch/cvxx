@@ -1,8 +1,10 @@
 //! XLL registration and `XLOPER12` adapters. The only module that speaks
 //! directly to Excel.
 
+pub mod constraint;
 pub mod expression;
 pub mod parameter;
+pub mod problem;
 pub mod variable;
 
 use xladd::registrator::Reg;
@@ -124,6 +126,118 @@ pub extern "system" fn xlAutoOpen() -> i32 {
         &[
             "Handle of the expression to scale.",
             "Numeric scalar multiplier.",
+            "Optional unique name for the result.",
+        ],
+    );
+
+    reg.add(
+        "CVX.CONSTRAINT",
+        "QQQ$",
+        "constraint_string, name",
+        "cvxx",
+        "Parses a constraint string and returns a cvxx constraint handle.",
+        &[
+            "A relational expression such as 'x + y <= 10'.",
+            "Optional unique name for the constraint.",
+        ],
+    );
+
+    reg.add(
+        "CVX.LESS_THAN",
+        "QQQ$",
+        "left, right, name",
+        "cvxx",
+        "Builds a cvxx constraint 'left <= right' and returns its handle.",
+        &[
+            "Handle, name, or numeric literal for the left-hand side.",
+            "Handle, name, or numeric literal for the right-hand side.",
+            "Optional unique name for the result.",
+        ],
+    );
+
+    reg.add(
+        "CVX.GREATER_THAN",
+        "QQQ$",
+        "left, right, name",
+        "cvxx",
+        "Builds a cvxx constraint 'left >= right' and returns its handle.",
+        &[
+            "Handle, name, or numeric literal for the left-hand side.",
+            "Handle, name, or numeric literal for the right-hand side.",
+            "Optional unique name for the result.",
+        ],
+    );
+
+    reg.add(
+        "CVX.EQUAL",
+        "QQQ$",
+        "left, right, name",
+        "cvxx",
+        "Builds a cvxx constraint 'left == right' and returns its handle.",
+        &[
+            "Handle, name, or numeric literal for the left-hand side.",
+            "Handle, name, or numeric literal for the right-hand side.",
+            "Optional unique name for the result.",
+        ],
+    );
+
+    reg.add(
+        "CVX.CONSTRAINTS",
+        "QQQ$",
+        "constraints, name",
+        "cvxx",
+        "Combines a range of cvxx constraint handles into a constraint set handle.",
+        &[
+            "A range of constraint handles or names. Blank cells are skipped.",
+            "Optional unique name for the constraint set.",
+        ],
+    );
+
+    reg.add(
+        "CVX.MINIMIZE",
+        "QQQ$",
+        "objective, name",
+        "cvxx",
+        "Builds a minimization objective and returns a cvxx objective handle.",
+        &[
+            "Handle, name, or numeric literal for the objective expression.",
+            "Optional unique name for the objective.",
+        ],
+    );
+
+    reg.add(
+        "CVX.MAXIMIZE",
+        "QQQ$",
+        "objective, name",
+        "cvxx",
+        "Builds a maximization objective and returns a cvxx objective handle.",
+        &[
+            "Handle, name, or numeric literal for the objective expression.",
+            "Optional unique name for the objective.",
+        ],
+    );
+
+    reg.add(
+        "CVX.PROBLEM",
+        "QQQQ$",
+        "objective, constraints, name",
+        "cvxx",
+        "Combines an objective and constraints into a cvxx problem and returns its handle.",
+        &[
+            "Handle or name of an objective created by CVX.MINIMIZE or CVX.MAXIMIZE.",
+            "Blank, a constraint set handle/name, or a range of constraint handles/names.",
+            "Optional unique name for the problem.",
+        ],
+    );
+
+    reg.add(
+        "CVX.SOLVE",
+        "QQQ$",
+        "problem, name",
+        "cvxx",
+        "Solves a cvxx problem and returns a result handle.",
+        &[
+            "Handle or name of a problem created by CVX.PROBLEM.",
             "Optional unique name for the result.",
         ],
     );

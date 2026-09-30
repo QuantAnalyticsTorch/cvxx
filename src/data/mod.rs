@@ -153,6 +153,43 @@ fn parse_cell(cell: &Variant) -> Result<f64, CvxError> {
     Err(CvxError::NonNumericCell)
 }
 
+/// Parses a range of cells as optional strings, flattening it row-major.
+/// Blank cells and empty/whitespace-only strings become `None`. A non-blank
+/// cell that does not contain a string is an error. A missing/empty range
+/// yields an empty vector rather than an error, since it is a valid input to
+/// `CVX.CONSTRAINTS` when combined with other arguments.
+pub fn parse_optional_string_range(range: &Variant) -> Result<Vec<Option<String>>, CvxError> {
+    let (cols, rows) = range.dim();
+    if cols == 0 || rows == 0 {
+        return Ok(Vec::new());
+    }
+
+    let mut out = Vec::with_capacity(rows * cols);
+    for row in 0..rows {
+        for col in 0..cols {
+            out.push(parse_optional_string_cell(&range.at(col, row))?);
+        }
+    }
+    Ok(out)
+}
+
+fn parse_optional_string_cell(cell: &Variant) -> Result<Option<String>, CvxError> {
+    if is_blank(cell) {
+        return Ok(None);
+    }
+    if let Some(s) = cell.as_string() {
+        let trimmed = s.trim();
+        return Ok(if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        });
+    }
+    Err(CvxError::InvalidExpression(
+        "expected a constraint handle or name".to_string(),
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -241,5 +278,50 @@ mod tests {
             parse_dimension(&Variant::from_float((MAX_DIMENSION + 1) as f64)).unwrap_err(),
             CvxError::InvalidDimension(_)
         ));
+    }
+
+    #[test]
+    fn parses_string_range_flattened_row_major() {
+        let cells = vec![
+            Variant::from_str("a"),
+            Variant::from_str("b"),
+            Variant::from_str("c"),
+            Variant::from_str("d"),
+        ];
+        let v = Variant::from_array(2, 2, &cells);
+        let parsed = parse_optional_string_range(&v).unwrap();
+        assert_eq!(
+            parsed,
+            vec![
+                Some("a".to_string()),
+                Some("b".to_string()),
+                Some("c".to_string()),
+                Some("d".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn treats_blank_cells_as_none_in_string_range() {
+        let cells = vec![Variant::from_str("a"), Variant::new()];
+        let v = Variant::from_array(2, 1, &cells);
+        let parsed = parse_optional_string_range(&v).unwrap();
+        assert_eq!(parsed, vec![Some("a".to_string()), None]);
+    }
+
+    #[test]
+    fn rejects_non_string_cells_in_string_range() {
+        let cells = vec![Variant::from_str("a"), Variant::from_float(1.0)];
+        let v = Variant::from_array(2, 1, &cells);
+        assert!(matches!(
+            parse_optional_string_range(&v).unwrap_err(),
+            CvxError::InvalidExpression(_)
+        ));
+    }
+
+    #[test]
+    fn treats_missing_range_as_empty() {
+        let parsed = parse_optional_string_range(&Variant::missing()).unwrap();
+        assert!(parsed.is_empty());
     }
 }

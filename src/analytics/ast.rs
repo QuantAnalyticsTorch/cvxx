@@ -31,3 +31,19 @@ impl Expr {
         Arc::new(self)
     }
 }
+
+/// A relational operator used in constraint strings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Relation {
+    LessEqual,
+    GreaterEqual,
+    Equal,
+}
+
+/// A parsed constraint: a relation between two expression subtrees.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Constraint {
+    pub relation: Relation,
+    pub lhs: ExprNode,
+    pub rhs: ExprNode,
+}

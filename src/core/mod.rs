@@ -7,5 +7,8 @@ pub mod variable;
 
 pub use error::CvxError;
 pub use handle::{format_handle, parse_handle, HandleKind};
-pub use registry::{ExpressionEntry, ParameterEntry, Registry, VariableEntry};
+pub use registry::{
+    ConstraintEntry, ConstraintSetEntry, ExpressionEntry, ObjectiveEntry, ParameterEntry,
+    ProblemEntry, Registry, ResultEntry, VariableEntry,
+};
 pub use variable::Variable;

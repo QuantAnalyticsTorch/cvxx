@@ -34,7 +34,7 @@ fn run_expression(expr: LPXLOPER12, name: LPXLOPER12) -> LPXLOPER12 {
     to_xloper_result(result, "CVX.EXPRESSION")
 }
 
-fn to_xloper_result(result: Result<String, CvxError>, context: &str) -> LPXLOPER12 {
+pub(crate) fn to_xloper_result(result: Result<String, CvxError>, context: &str) -> LPXLOPER12 {
     match result {
         Ok(handle) => Box::into_raw(Box::new(Variant::from_str(&handle))) as LPXLOPER12,
         Err(err) => {
@@ -144,7 +144,7 @@ fn run_scale(
     Registry::global().insert_expression(name, expr, vec![])
 }
 
-fn resolve_handle_arg(arg: LPXLOPER12) -> Result<Expression, CvxError> {
+pub(crate) fn resolve_handle_arg(arg: LPXLOPER12) -> Result<Expression, CvxError> {
     let text = data::parse_string(&Variant::from_xloper(arg))?
         .trim()
         .to_string();
@@ -165,6 +165,11 @@ fn resolve_handle_arg(arg: LPXLOPER12) -> Result<Expression, CvxError> {
                 .get_expression_by_uuid(uuid)
                 .map(|e| e.expression)
                 .ok_or_else(|| CvxError::UnknownIdentifier(text.clone())),
+            HandleKind::Constr
+            | HandleKind::ConstrSet
+            | HandleKind::Obj
+            | HandleKind::Prob
+            | HandleKind::Result => Err(CvxError::UnknownIdentifier(text.clone())),
         }
     } else {
         // Allow referencing named objects by name as a convenience.
@@ -225,6 +230,11 @@ mod tests {
                 .get_expression_by_uuid(uuid)
                 .map(|e| e.expression)
                 .ok_or_else(|| CvxError::UnknownIdentifier(handle.to_string())),
+            HandleKind::Constr
+            | HandleKind::ConstrSet
+            | HandleKind::Obj
+            | HandleKind::Prob
+            | HandleKind::Result => Err(CvxError::UnknownIdentifier(handle.to_string())),
         }
     }
 }

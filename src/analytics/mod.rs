@@ -5,6 +5,6 @@ pub mod ast;
 pub mod parser;
 pub mod resolve;
 
-pub use ast::{Expr, ExprNode};
-pub use parser::parse;
-pub use resolve::{resolve_expr, ResolvedExpr};
+pub use ast::{Constraint, Expr, ExprNode, Relation};
+pub use parser::{parse, parse_constraint};
+pub use resolve::{resolve_constraint, resolve_expr, ResolvedConstraint, ResolvedExpr};

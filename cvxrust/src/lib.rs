@@ -101,3 +101,102 @@ impl Expression {
         }
     }
 }
+
+/// The optimization sense of a problem.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Sense {
+    Minimize,
+    Maximize,
+}
+
+/// A relational operator between two expressions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Relation {
+    LessEqual,
+    GreaterEqual,
+    Equal,
+}
+
+/// A single constraint: a relation between two expressions.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Constraint {
+    pub relation: Relation,
+    pub lhs: Expression,
+    pub rhs: Expression,
+}
+
+/// A convex optimization problem: an objective with a sense, a list of
+/// constraints, and the ordered list of variables the caller wants solved
+/// values for.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Problem {
+    pub sense: Sense,
+    pub objective: Expression,
+    pub constraints: Vec<Constraint>,
+    /// Ordered, positionally aligned with `Solution::variable_values`.
+    pub variables: Vec<Variable>,
+}
+
+/// The outcome of attempting to solve a [`Problem`].
+#[derive(Debug, Clone, PartialEq)]
+pub enum SolveStatus {
+    Optimal,
+    Infeasible,
+    Unbounded,
+    Error(String),
+}
+
+/// The result of a solve attempt.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Solution {
+    pub status: SolveStatus,
+    pub objective_value: Option<f64>,
+    /// Aligned by index with `Problem::variables`; each inner `Vec<f64>` is
+    /// row-major data matching that variable's shape. Empty when `status`
+    /// is not `Optimal`.
+    pub variable_values: Vec<Vec<f64>>,
+}
+
+/// Attempts to solve `problem`. This placeholder crate has no solver
+/// implementation yet, so this always reports that solving is not
+/// implemented; a real `cvxrust` would replace this with an actual convex
+/// solver.
+pub fn solve(_problem: &Problem) -> Solution {
+    Solution {
+        status: SolveStatus::Error("not implemented".to_string()),
+        objective_value: None,
+        variable_values: Vec::new(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn solve_reports_not_implemented() {
+        let problem = Problem {
+            sense: Sense::Minimize,
+            objective: Expression::constant(0.0),
+            constraints: Vec::new(),
+            variables: Vec::new(),
+        };
+        let solution = solve(&problem);
+        assert_eq!(
+            solution.status,
+            SolveStatus::Error("not implemented".to_string())
+        );
+        assert_eq!(solution.objective_value, None);
+        assert!(solution.variable_values.is_empty());
+    }
+
+    #[test]
+    fn builds_a_constraint() {
+        let constraint = Constraint {
+            relation: Relation::LessEqual,
+            lhs: Expression::constant(1.0),
+            rhs: Expression::constant(2.0),
+        };
+        assert_eq!(constraint.relation, Relation::LessEqual);
+    }
+}

@@ -9,6 +9,11 @@ pub enum HandleKind {
     Param,
     Var,
     Expr,
+    Constr,
+    ConstrSet,
+    Obj,
+    Prob,
+    Result,
 }
 
 impl HandleKind {
@@ -17,6 +22,11 @@ impl HandleKind {
             HandleKind::Param => "param",
             HandleKind::Var => "var",
             HandleKind::Expr => "expr",
+            HandleKind::Constr => "constr",
+            HandleKind::ConstrSet => "constrset",
+            HandleKind::Obj => "obj",
+            HandleKind::Prob => "prob",
+            HandleKind::Result => "result",
         }
     }
 }
@@ -42,6 +52,11 @@ pub fn parse_handle(handle: &str) -> Result<(HandleKind, Uuid), CvxError> {
         "param" => HandleKind::Param,
         "var" => HandleKind::Var,
         "expr" => HandleKind::Expr,
+        "constr" => HandleKind::Constr,
+        "constrset" => HandleKind::ConstrSet,
+        "obj" => HandleKind::Obj,
+        "prob" => HandleKind::Prob,
+        "result" => HandleKind::Result,
         _ => return Err(CvxError::InvalidHandle(handle.to_string())),
     };
 
@@ -72,6 +87,41 @@ mod tests {
         let id = Uuid::new_v4();
         let handle = format_handle(HandleKind::Expr, id);
         assert_eq!(parse_handle(&handle).unwrap(), (HandleKind::Expr, id));
+    }
+
+    #[test]
+    fn round_trips_a_constraint_handle() {
+        let id = Uuid::new_v4();
+        let handle = format_handle(HandleKind::Constr, id);
+        assert_eq!(parse_handle(&handle).unwrap(), (HandleKind::Constr, id));
+    }
+
+    #[test]
+    fn round_trips_a_constraint_set_handle() {
+        let id = Uuid::new_v4();
+        let handle = format_handle(HandleKind::ConstrSet, id);
+        assert_eq!(parse_handle(&handle).unwrap(), (HandleKind::ConstrSet, id));
+    }
+
+    #[test]
+    fn round_trips_an_objective_handle() {
+        let id = Uuid::new_v4();
+        let handle = format_handle(HandleKind::Obj, id);
+        assert_eq!(parse_handle(&handle).unwrap(), (HandleKind::Obj, id));
+    }
+
+    #[test]
+    fn round_trips_a_problem_handle() {
+        let id = Uuid::new_v4();
+        let handle = format_handle(HandleKind::Prob, id);
+        assert_eq!(parse_handle(&handle).unwrap(), (HandleKind::Prob, id));
+    }
+
+    #[test]
+    fn round_trips_a_result_handle() {
+        let id = Uuid::new_v4();
+        let handle = format_handle(HandleKind::Result, id);
+        assert_eq!(parse_handle(&handle).unwrap(), (HandleKind::Result, id));
     }
 
     #[test]
