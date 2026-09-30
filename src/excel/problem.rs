@@ -378,7 +378,7 @@ mod tests {
         let var_handle = registry.insert_variable(None, (1, 1)).unwrap();
         let (_, var_uuid) = parse_handle(&var_handle).unwrap();
         let variable_entry = registry.get_variable_by_uuid(var_uuid).unwrap();
-        let variable_expr = Expression::from_variable(variable_entry.variable.clone());
+        let variable_expr = Expression::from_variable(variable_entry.variable);
 
         let objective_handle = registry
             .insert_objective(
@@ -427,26 +427,106 @@ mod tests {
     #[test]
     fn solve_reports_excel_error_and_does_not_store_a_result() {
         let registry = Registry::global();
+        let var_handle = registry.insert_variable(None, (2, 1)).unwrap();
+        let (_, var_uuid) = parse_handle(&var_handle).unwrap();
+        let variable_entry = registry.get_variable_by_uuid(var_uuid).unwrap();
+        let variable_expr = Expression::from_variable(variable_entry.variable);
+
         let objective_handle = registry
-            .insert_objective(None, Sense::Minimize, Expression::constant(1.0), vec![])
+            .insert_objective(
+                None,
+                Sense::Minimize,
+                variable_expr,
+                vec![var_handle.clone()],
+            )
             .unwrap();
         let problem_handle = registry
             .insert_problem(
                 Some("solve_error_test_problem".to_string()),
                 parse_handle(&objective_handle).unwrap().1,
                 vec![],
-                vec![],
+                vec![var_uuid],
             )
             .unwrap();
 
         let result = run_solve_for_test(&problem_handle, None);
         assert_eq!(
             result.unwrap_err(),
-            CvxError::SolveFailed("not implemented".to_string())
+            CvxError::SolveFailed(
+                "solver only supports scalar (1x1) variables and parameters".to_string()
+            )
         );
         assert!(registry
             .get_result_by_name("solve_error_test_problem_result")
             .is_none());
+    }
+
+    #[test]
+    fn solve_result_variable_values_match_each_variables_own_coefficient() {
+        // Regression test for the variable-identity fix (SPEC-0010): two
+        // distinct scalar variables of identical shape must not be
+        // confused with each other when recovering solved values.
+        let registry = Registry::global();
+
+        let x_handle = registry.insert_variable(None, (1, 1)).unwrap();
+        let (_, x_uuid) = parse_handle(&x_handle).unwrap();
+        let x_variable = registry.get_variable_by_uuid(x_uuid).unwrap().variable;
+
+        let y_handle = registry.insert_variable(None, (1, 1)).unwrap();
+        let (_, y_uuid) = parse_handle(&y_handle).unwrap();
+        let y_variable = registry.get_variable_by_uuid(y_uuid).unwrap().variable;
+
+        // minimize x + y subject to x >= 3, y >= 5
+        let objective_expr = Expression::add(
+            Expression::from_variable(x_variable),
+            Expression::from_variable(y_variable),
+        );
+        let objective_handle = registry
+            .insert_objective(None, Sense::Minimize, objective_expr, vec![])
+            .unwrap();
+
+        let x_constraint_handle = registry
+            .insert_constraint(
+                None,
+                Relation::GreaterEqual,
+                Expression::from_variable(x_variable),
+                Expression::constant(3.0),
+                vec![],
+            )
+            .unwrap();
+        let (_, x_constraint_uuid) = parse_handle(&x_constraint_handle).unwrap();
+
+        let y_constraint_handle = registry
+            .insert_constraint(
+                None,
+                Relation::GreaterEqual,
+                Expression::from_variable(y_variable),
+                Expression::constant(5.0),
+                vec![],
+            )
+            .unwrap();
+        let (_, y_constraint_uuid) = parse_handle(&y_constraint_handle).unwrap();
+
+        let problem_handle = registry
+            .insert_problem(
+                Some("solve_variable_identity_test_problem".to_string()),
+                parse_handle(&objective_handle).unwrap().1,
+                vec![x_constraint_uuid, y_constraint_uuid],
+                vec![x_uuid, y_uuid],
+            )
+            .unwrap();
+
+        let result_handle = run_solve_for_test(
+            &problem_handle,
+            Some("solve_variable_identity_test_result".to_string()),
+        )
+        .unwrap();
+        let (_, result_uuid) = parse_handle(&result_handle).unwrap();
+        let result_entry = registry.get_result_by_uuid(result_uuid).unwrap();
+
+        assert_eq!(result_entry.status, cvxrust::SolveStatus::Optimal);
+        assert!((result_entry.variable_values[&x_uuid][0] - 3.0).abs() < 1e-6);
+        assert!((result_entry.variable_values[&y_uuid][0] - 5.0).abs() < 1e-6);
     }
 
     fn run_solve_for_test(problem_text: &str, name: Option<String>) -> Result<String, CvxError> {
@@ -457,22 +537,44 @@ mod tests {
             .get_objective_by_uuid(problem_entry.objective)
             .unwrap();
 
+        let mut cvx_constraints = Vec::with_capacity(problem_entry.constraints.len());
+        for uuid in &problem_entry.constraints {
+            let entry = registry.get_constraint_by_uuid(*uuid).unwrap();
+            cvx_constraints.push(cvxrust::Constraint {
+                relation: translate_relation(entry.relation),
+                lhs: entry.lhs,
+                rhs: entry.rhs,
+            });
+        }
+
+        let mut cvx_variables = Vec::with_capacity(problem_entry.variables.len());
+        for uuid in &problem_entry.variables {
+            let entry = registry.get_variable_by_uuid(*uuid).unwrap();
+            cvx_variables.push(entry.variable);
+        }
+
         let cvx_problem = cvxrust::Problem {
             sense: objective_entry.sense,
             objective: objective_entry.expression,
-            constraints: vec![],
-            variables: vec![],
+            constraints: cvx_constraints,
+            variables: cvx_variables,
         };
         let solution = cvxrust::solve(&cvx_problem);
         if let cvxrust::SolveStatus::Error(message) = &solution.status {
             return Err(CvxError::SolveFailed(message.clone()));
         }
+
+        let mut variable_values = HashMap::with_capacity(problem_entry.variables.len());
+        for (uuid, values) in problem_entry.variables.iter().zip(solution.variable_values) {
+            variable_values.insert(*uuid, values);
+        }
+
         registry.insert_result(
             name,
             problem_uuid,
             solution.status,
             solution.objective_value,
-            HashMap::new(),
+            variable_values,
         )
     }
 

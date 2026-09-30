@@ -50,15 +50,28 @@ Returns a `cvx:prob:<uuid>` handle.
 - `name`: optional unique name for the result.
 
 Returns a `cvx:result:<uuid>` handle on `Optimal`, `Infeasible`, or
-`Unbounded` outcomes. **`cvxrust` does not yet implement a solver**, so
-`CVX.SOLVE` currently always fails and returns `#VALUE!`; no result is
-stored in that case.
+`Unbounded` outcomes.
+
+`cvxrust` solves problems built from scalar (`1x1`) variables and
+parameters: affine objectives subject to affine `<=`, `>=`, and `=`
+constraints, by translating the problem into a conic program and
+delegating to the `clarabel` solver. Problems outside this class fail with
+a descriptive error and return `#VALUE!` (no result is stored):
+
+- a variable or parameter with a shape other than `(1, 1)`;
+- a nonlinear term (a product or quotient of two variable-dependent
+  sub-expressions);
+- division by zero, or division by a variable-dependent term;
+- a problem exceeding the solver's size limit (200 variables / 200
+  constraints).
 
 ## Error conditions
 
 - Unknown or wrong-kind objective/problem handles return `#VALUE!`.
 - Unresolvable constraint handles/names within `constraints` return `#VALUE!`.
-- A solver failure (including the current "not implemented" placeholder)
-  returns `#VALUE!` and does not create a result entry.
+- A solver failure (an unsupported problem type, reported as a descriptive
+  error message) returns `#VALUE!` and does not create a result entry.
+  `Infeasible` and `Unbounded` outcomes are not failures: they store a
+  result entry with that status, same as `Optimal`.
 - Duplicate names return `#VALUE!`.
 - Diagnostics are logged to `%TEMP%/cvxx.log`.

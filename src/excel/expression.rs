@@ -205,11 +205,12 @@ mod tests {
         let handle = Registry::global()
             .insert_variable(Some("x".to_string()), (1, 1))
             .unwrap();
+        let variable = Registry::global()
+            .get_variable_by_name("x")
+            .unwrap()
+            .variable;
         let expr = resolve_handle_for_test(&handle).unwrap();
-        assert_eq!(
-            expr,
-            Expression::from_variable(crate::core::Variable::new((1, 1)))
-        );
+        assert_eq!(expr, Expression::from_variable(variable));
     }
 
     fn resolve_handle_for_test(handle: &str) -> Result<Expression, CvxError> {

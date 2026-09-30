@@ -22,7 +22,8 @@ Capture domain knowledge for convex optimization in `cvxx`.
    - Use a normalized internal representation.
 
 4. **Solver invocation**
-   - Delegate numerical solving to `cvxrust`.
+   - Delegate numerical solving to `cvxrust`, which in turn delegates to `clarabel` (a pure-Rust conic solver) as the standing solver framework for this project.
+   - Formulate problems as conic programs (`P`, `q`, `A`, `b`, cones) when translating for `clarabel`; extend this translation rather than adding another solver crate.
    - Handle solver status: optimal, infeasible, unbounded, numerical failure.
    - Return dual values or sensitivity information only when requested.
 

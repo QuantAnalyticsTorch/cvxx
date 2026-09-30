@@ -39,3 +39,4 @@ Implement technical specifications as Rust code, tests, examples, and documentat
 - Do not implement features not covered by a specification.
 - Do not write business requirements.
 - Keep functions small and module responsibilities clear.
+- `clarabel` is the standing solver framework for `cvxrust`. Do not introduce a different solver crate; extend the existing `clarabel` translation layer instead.

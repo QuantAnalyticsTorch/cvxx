@@ -11,8 +11,9 @@ Build an Excel add-in that exposes `cvxrust` convex optimization to Excel via a 
 1. **Layered boundaries**
    - Excel UI layer: `xlam` ribbon, VBA/JS helpers, HTML help.
    - Excel C API layer: Rust XLL using `xladd` / `XLOPER12`.
-   - Optimization layer: `cvxrust` problem formulation and solvers.
+   - Optimization layer: `cvxrust` problem formulation and solvers, numerically backed by `clarabel` (the standing conic solver framework for this project; see `docs/architecture.md`).
    - Never let UI code call solver internals directly; always go through the XLL function surface.
+   - `clarabel` is an implementation detail of `cvxrust`; `cvxx` never depends on it directly.
 
 2. **Memory safety**
    - All code touching the Excel C API must be Rust `unsafe` only in thin, reviewed wrappers.
@@ -43,6 +44,7 @@ Build an Excel add-in that exposes `cvxrust` convex optimization to Excel via a 
   - `core/` — handle registry, opaque identifiers, object lifetime management, and shared error types.
   - `analytics/` — `cvxrust` problem construction, solver invocation, and result extraction.
 - Excel cannot receive Rust objects. Complex state is stored in a thread-safe handle registry and surfaced to Excel as opaque string handles (e.g., `cvx:var:<uuid>`).
+- Convex problems are solved by translating them into a conic program and delegating to `clarabel` inside `cvxrust`. Extending problem-class support (e.g., quadratic objectives) means widening this translation layer, not introducing another solver crate.
 
 ## Excel Integration Conventions
 

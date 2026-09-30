@@ -9,3 +9,6 @@ authors = ["cvxx contributors"]
 [lib]
 name = "cvxrust"
 crate-type = ["rlib"]
+
+[dependencies]
+clarabel = "0.9"

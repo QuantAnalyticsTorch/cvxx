@@ -1,6 +1,6 @@
 # cvxx
 
-`cvxx` is an Excel add-in that exposes convex optimization capabilities to Excel worksheets through a Rust implementation built on top of `cvxrust`. It consists of:
+`cvxx` is an Excel add-in that exposes convex optimization capabilities to Excel worksheets through a Rust implementation built on top of `cvxrust`. Numerical solving inside `cvxrust` is delegated to [`clarabel`](https://crates.io/crates/clarabel), a pure-Rust conic (LP/QP) solver, which is the standing solver framework for this project. It consists of:
 
 - A Rust dynamic-link library (DLL/XLL) that registers optimization functions with Excel via [`xladd`](https://github.com/MathiasPius/xladd) and the `XLOPER12` API.
 - An Excel macro-enabled add-in (`cvxx.xlam`) that provides a ribbon tab with documentation links, examples, and helper utilities.

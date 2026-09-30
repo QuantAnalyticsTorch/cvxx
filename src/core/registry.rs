@@ -262,7 +262,7 @@ impl Registry {
             uuid,
             name: entry_name,
             shape,
-            variable: Variable::new(shape),
+            variable: Variable::new(uuid.as_u64_pair().0, shape),
         };
 
         // Overwrite any existing variable with the same name for

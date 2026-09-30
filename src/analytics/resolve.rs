@@ -194,14 +194,12 @@ mod tests {
         registry
             .insert_variable(Some("x".to_string()), (3, 1))
             .unwrap();
+        let variable = registry.get_variable_by_name("x").unwrap().variable;
 
         let ast = parse("x").unwrap();
         let resolved = resolve_expr(&registry, &ast).unwrap();
 
-        assert_eq!(
-            resolved.expression,
-            Expression::from_variable(crate::core::Variable::new((3, 1)))
-        );
+        assert_eq!(resolved.expression, Expression::from_variable(variable));
     }
 
     #[test]
@@ -213,6 +211,7 @@ mod tests {
         registry
             .insert_variable(Some("x".to_string()), (1, 1))
             .unwrap();
+        let variable = registry.get_variable_by_name("x").unwrap().variable;
 
         let ast = parse("2.5 * (A - x)").unwrap();
         let resolved = resolve_expr(&registry, &ast).unwrap();
@@ -223,7 +222,7 @@ mod tests {
                 Expression::constant(2.5),
                 Expression::sub(
                     Expression::from_parameter((1, 1), vec![1.0]),
-                    Expression::from_variable(crate::core::Variable::new((1, 1)))
+                    Expression::from_variable(variable)
                 )
             )
         );
@@ -250,15 +249,13 @@ mod tests {
         registry
             .insert_parameter(Some("b".to_string()), (1, 1), vec![10.0])
             .unwrap();
+        let variable = registry.get_variable_by_name("x").unwrap().variable;
 
         let constraint = parse_constraint("x <= b").unwrap();
         let resolved = resolve_constraint(&registry, &constraint).unwrap();
 
         assert_eq!(resolved.relation, Relation::LessEqual);
-        assert_eq!(
-            resolved.lhs,
-            Expression::from_variable(crate::core::Variable::new((1, 1)))
-        );
+        assert_eq!(resolved.lhs, Expression::from_variable(variable));
         assert_eq!(resolved.rhs, Expression::from_parameter((1, 1), vec![10.0]));
         let mut deps = resolved.dependencies;
         deps.sort();
