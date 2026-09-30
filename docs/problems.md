@@ -53,14 +53,21 @@ Returns a `cvx:result:<uuid>` handle on `Optimal`, `Infeasible`, or
 `Unbounded` outcomes.
 
 `cvxrust` solves problems built from scalar (`1x1`) variables and
-parameters: affine objectives subject to affine `<=`, `>=`, and `=`
-constraints, by translating the problem into a conic program and
-delegating to the `clarabel` solver. Problems outside this class fail with
-a descriptive error and return `#VALUE!` (no result is stored):
+parameters: affine or convex quadratic objectives subject to affine
+`<=`/`>=`/`=` constraints and convex quadratic `<=`/`>=` constraints, by
+translating the problem into a conic program and delegating to the
+`clarabel` solver. A quadratic term is any product of two
+variable-dependent sub-expressions (e.g. `x * x` or `x * y`). Problems
+outside this class fail with a descriptive error and return `#VALUE!` (no
+result is stored):
 
 - a variable or parameter with a shape other than `(1, 1)`;
-- a nonlinear term (a product or quotient of two variable-dependent
-  sub-expressions);
+- a term of degree 3 or higher (a product or quotient involving three or
+  more variable-dependent sub-expressions);
+- a quadratic **equality** constraint (`==`) — only quadratic `<=`/`>=`
+  constraints are supported;
+- a quadratic constraint whose coefficient matrix is not positive
+  semidefinite (i.e. not convex);
 - division by zero, or division by a variable-dependent term;
 - a problem exceeding the solver's size limit (200 variables / 200
   constraints).

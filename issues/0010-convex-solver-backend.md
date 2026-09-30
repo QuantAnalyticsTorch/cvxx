@@ -2,7 +2,7 @@
 id: ISSUE-0010
 title: Provide a working convex solver backend
 priority: must
-status: draft
+status: done
 created: 2026-09-30
 ---
 

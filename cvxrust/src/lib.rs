@@ -12,9 +12,10 @@ use std::collections::HashMap;
 
 use clarabel::algebra::CscMatrix;
 use clarabel::solver::{
-    DefaultSettings, DefaultSolver, IPSolver, NonnegativeConeT, SolverStatus as ClarabelStatus,
-    SupportedConeT, ZeroConeT,
+    DefaultSettings, DefaultSolver, IPSolver, NonnegativeConeT, SecondOrderConeT,
+    SolverStatus as ClarabelStatus, SupportedConeT, ZeroConeT,
 };
+use nalgebra::{DMatrix, SymmetricEigen};
 
 /// A decision variable of a given shape.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -179,29 +180,52 @@ pub const MAX_CONSTRAINTS: usize = 200;
 /// running indefinitely, set via `DefaultSettings::max_iter`.
 pub const MAX_ITERATIONS: u32 = 200;
 
-/// The linearization of an `Expression` into `constant + sum(coeffs[i] * x[i])`
-/// form, positionally aligned with a problem's variable list.
+/// Eigenvalues of a quadratic constraint's coefficient matrix below this
+/// (in absolute value, when negative) are treated as a convexity violation;
+/// eigenvalues at or below this threshold in magnitude are treated as zero
+/// (dropped from the second-order-cone factorization).
+const PSD_TOLERANCE: f64 = 1e-8;
+
+/// The reduction of an `Expression` into
+/// `constant + linear . x + sum_{i<=j} quad[(i,j)] * x_i * x_j` form,
+/// positionally aligned with a problem's variable list. `quad` is empty for
+/// a purely affine expression, which is the common case and takes the same
+/// code paths as a plain affine form throughout `solve`.
 #[derive(Debug)]
-struct AffineForm {
+struct QuadraticForm {
     constant: f64,
-    coeffs: Vec<f64>,
+    linear: Vec<f64>,
+    /// Sparse upper-triangular entries `(i, j, coeff)` with `i <= j`;
+    /// `i == j` is the coefficient of `x_i^2`, `i < j` is the *total*
+    /// coefficient of the `x_i * x_j` cross term (not halved).
+    quad: Vec<(usize, usize, f64)>,
 }
 
-impl AffineForm {
+impl QuadraticForm {
     fn zero(n: usize, constant: f64) -> Self {
-        AffineForm {
+        QuadraticForm {
             constant,
-            coeffs: vec![0.0; n],
+            linear: vec![0.0; n],
+            quad: Vec::new(),
         }
     }
 
+    /// A pure number: no linear or quadratic dependence on any variable.
     fn is_constant(&self) -> bool {
-        self.coeffs.iter().all(|c| *c == 0.0)
+        self.quad.is_empty() && self.linear.iter().all(|c| *c == 0.0)
+    }
+
+    /// No quadratic term (degree <= 1).
+    fn is_affine(&self) -> bool {
+        self.quad.is_empty()
     }
 
     fn negate(mut self) -> Self {
         self.constant = -self.constant;
-        for c in self.coeffs.iter_mut() {
+        for c in self.linear.iter_mut() {
+            *c = -*c;
+        }
+        for (_, _, c) in self.quad.iter_mut() {
             *c = -*c;
         }
         self
@@ -209,27 +233,73 @@ impl AffineForm {
 
     fn scale(mut self, scalar: f64) -> Self {
         self.constant *= scalar;
-        for c in self.coeffs.iter_mut() {
+        for c in self.linear.iter_mut() {
+            *c *= scalar;
+        }
+        for (_, _, c) in self.quad.iter_mut() {
             *c *= scalar;
         }
         self
     }
 
-    fn add(mut self, other: &AffineForm) -> Self {
+    fn add(mut self, other: &QuadraticForm) -> Self {
         self.constant += other.constant;
-        for (a, b) in self.coeffs.iter_mut().zip(other.coeffs.iter()) {
+        for (a, b) in self.linear.iter_mut().zip(other.linear.iter()) {
             *a += *b;
         }
+        self.quad = combine_quad(self.quad, &other.quad, 1.0);
         self
     }
 
-    fn sub(mut self, other: &AffineForm) -> Self {
+    fn sub(mut self, other: &QuadraticForm) -> Self {
         self.constant -= other.constant;
-        for (a, b) in self.coeffs.iter_mut().zip(other.coeffs.iter()) {
+        for (a, b) in self.linear.iter_mut().zip(other.linear.iter()) {
             *a -= *b;
         }
+        self.quad = combine_quad(self.quad, &other.quad, -1.0);
         self
     }
+}
+
+/// Merges `quad`'s entries with `sign * other`'s entries, keyed by `(i, j)`,
+/// dropping any resulting zero coefficients to keep the list sparse.
+fn combine_quad(
+    quad: Vec<(usize, usize, f64)>,
+    other: &[(usize, usize, f64)],
+    sign: f64,
+) -> Vec<(usize, usize, f64)> {
+    let mut map: HashMap<(usize, usize), f64> = HashMap::new();
+    for (i, j, c) in quad {
+        *map.entry((i, j)).or_insert(0.0) += c;
+    }
+    for &(i, j, c) in other {
+        *map.entry((i, j)).or_insert(0.0) += sign * c;
+    }
+    map.into_iter()
+        .filter(|(_, c)| *c != 0.0)
+        .map(|((i, j), c)| (i, j, c))
+        .collect()
+}
+
+/// Builds the sparse, `i <= j`-canonicalized `(i, j, coeff)` list for
+/// `sum_i sum_j a[i] * b[j] * x_i * x_j`, the quadratic term produced by
+/// multiplying two affine forms with linear coefficients `a` and `b`.
+fn outer_product_symmetrized(a: &[f64], b: &[f64]) -> Vec<(usize, usize, f64)> {
+    let n = a.len();
+    let mut result = Vec::new();
+    for i in 0..n {
+        for j in i..n {
+            let coeff = if i == j {
+                a[i] * b[i]
+            } else {
+                a[i] * b[j] + a[j] * b[i]
+            };
+            if coeff != 0.0 {
+                result.push((i, j, coeff));
+            }
+        }
+    }
+    result
 }
 
 /// Step 1 — checks that every variable/parameter reachable from `problem`
@@ -281,21 +351,22 @@ fn check_expr_shapes(expr: &Expression) -> Result<(), String> {
     }
 }
 
-/// Step 2 — reduces `expr` to an [`AffineForm`] over `problem.variables`
+/// Step 2 — reduces `expr` to a [`QuadraticForm`] over `problem.variables`
 /// (via `index`, mapping variable id to position), or returns a descriptive
-/// error for any non-affine construct.
-fn linearize(
+/// error for any construct of degree higher than 2 (or an illegal
+/// division).
+fn quadratize(
     expr: &Expression,
     index: &HashMap<u64, usize>,
     n: usize,
-) -> Result<AffineForm, String> {
+) -> Result<QuadraticForm, String> {
     match expr {
-        Expression::Constant(c) => Ok(AffineForm::zero(n, *c)),
-        Expression::Parameter { data, .. } => Ok(AffineForm::zero(n, data[0])),
+        Expression::Constant(c) => Ok(QuadraticForm::zero(n, *c)),
+        Expression::Parameter { data, .. } => Ok(QuadraticForm::zero(n, data[0])),
         Expression::Variable(v) => match index.get(&v.id) {
             Some(&i) => {
-                let mut form = AffineForm::zero(n, 0.0);
-                form.coeffs[i] = 1.0;
+                let mut form = QuadraticForm::zero(n, 0.0);
+                form.linear[i] = 1.0;
                 Ok(form)
             }
             None => Err(
@@ -304,34 +375,43 @@ fn linearize(
             ),
         },
         Expression::Add(l, r) => {
-            let lf = linearize(l, index, n)?;
-            let rf = linearize(r, index, n)?;
+            let lf = quadratize(l, index, n)?;
+            let rf = quadratize(r, index, n)?;
             Ok(lf.add(&rf))
         }
         Expression::Sub(l, r) => {
-            let lf = linearize(l, index, n)?;
-            let rf = linearize(r, index, n)?;
+            let lf = quadratize(l, index, n)?;
+            let rf = quadratize(r, index, n)?;
             Ok(lf.sub(&rf))
         }
-        Expression::Neg(e) => Ok(linearize(e, index, n)?.negate()),
-        Expression::Scale { scalar, expr } => Ok(linearize(expr, index, n)?.scale(*scalar)),
+        Expression::Neg(e) => Ok(quadratize(e, index, n)?.negate()),
+        Expression::Scale { scalar, expr } => Ok(quadratize(expr, index, n)?.scale(*scalar)),
         Expression::Mul(l, r) => {
-            let lf = linearize(l, index, n)?;
-            let rf = linearize(r, index, n)?;
+            let lf = quadratize(l, index, n)?;
+            let rf = quadratize(r, index, n)?;
             if lf.is_constant() {
                 Ok(rf.scale(lf.constant))
             } else if rf.is_constant() {
                 Ok(lf.scale(rf.constant))
+            } else if lf.is_affine() && rf.is_affine() {
+                let linear: Vec<f64> = (0..n)
+                    .map(|i| lf.constant * rf.linear[i] + rf.constant * lf.linear[i])
+                    .collect();
+                Ok(QuadraticForm {
+                    constant: lf.constant * rf.constant,
+                    linear,
+                    quad: outer_product_symmetrized(&lf.linear, &rf.linear),
+                })
             } else {
                 Err(
-                    "solver only supports linear (affine) objectives and constraints; a product of two variable-dependent terms was found"
+                    "solver only supports linear and quadratic (degree <= 2) objectives and constraints; a product of three or more variable-dependent terms was found"
                         .to_string(),
                 )
             }
         }
         Expression::Div(l, r) => {
-            let lf = linearize(l, index, n)?;
-            let rf = linearize(r, index, n)?;
+            let lf = quadratize(l, index, n)?;
+            let rf = quadratize(r, index, n)?;
             if rf.is_constant() {
                 if rf.constant.abs() < 1e-12 {
                     Err("division by zero in objective or constraint".to_string())
@@ -340,7 +420,7 @@ fn linearize(
                 }
             } else {
                 Err(
-                    "solver only supports linear (affine) objectives and constraints; division by a variable-dependent term was found"
+                    "solver only supports linear or quadratic objectives and constraints; division by a variable-dependent term was found"
                         .to_string(),
                 )
             }
@@ -381,6 +461,90 @@ fn error_solution(message: impl Into<String>) -> Solution {
     }
 }
 
+/// Builds a dense, symmetric `n x n` matrix from sparse upper-triangular
+/// `(i, j, coeff)` entries (`i <= j`), applying `diag_scale` to `i == j`
+/// entries and mirroring `off_scale * coeff` into both `(i, j)` and `(j, i)`
+/// otherwise. Used both for `clarabel`'s objective `P` matrix (`diag_scale =
+/// 2.0, off_scale = 1.0`, since `clarabel` minimizes `(1/2) x^T P x + ...`)
+/// and for a quadratic constraint's coefficient matrix `Q` (`diag_scale =
+/// 1.0, off_scale = 0.5`, since a constraint is evaluated as `x^T Q x`
+/// directly).
+fn symmetric_dense(
+    entries: &[(usize, usize, f64)],
+    n: usize,
+    diag_scale: f64,
+    off_scale: f64,
+) -> Vec<Vec<f64>> {
+    let mut dense = vec![vec![0.0; n]; n];
+    for &(i, j, coeff) in entries {
+        if i == j {
+            dense[i][i] += diag_scale * coeff;
+        } else {
+            dense[i][j] += off_scale * coeff;
+            dense[j][i] += off_scale * coeff;
+        }
+    }
+    dense
+}
+
+/// One second-order-cone row block: `a_rows`/`b_vals` (equal length, one
+/// entry per cone dimension) to append to the constraint matrix/vector.
+type SocBlock = (Vec<Vec<f64>>, Vec<f64>);
+
+/// Reduces a quadratic constraint already normalized to `diff <= 0` form
+/// (`diff` is `x^T Q x + q . x + c`, `Q` from `diff.quad`) into a
+/// second-order-cone row block `(a_rows, b_vals)` such that pushing these
+/// rows/values and a `SecondOrderConeT(a_rows.len())` cone reproduces the
+/// original constraint exactly (SPEC-0011). Returns `Ok(None)` when `Q`'s
+/// eigenvalues are all within `PSD_TOLERANCE` of zero (the quadratic part
+/// numerically cancels out, so the constraint is really affine), and an
+/// `Err` when `Q` is not positive semidefinite (the constraint is not
+/// convex).
+fn build_soc_block(diff: &QuadraticForm, n: usize) -> Result<Option<SocBlock>, String> {
+    let dense = symmetric_dense(&diff.quad, n, 1.0, 0.5);
+    let matrix = DMatrix::from_row_iterator(n, n, dense.iter().flatten().copied());
+    let eigen = SymmetricEigen::new(matrix);
+
+    if eigen
+        .eigenvalues
+        .iter()
+        .any(|&lambda| lambda < -PSD_TOLERANCE)
+    {
+        return Err(
+            "quadratic constraint is not convex (matrix is not positive semidefinite)".to_string(),
+        );
+    }
+
+    let mut z_rows: Vec<Vec<f64>> = Vec::new();
+    for k in 0..n {
+        let lambda = eigen.eigenvalues[k];
+        if lambda > PSD_TOLERANCE {
+            let scale = lambda.sqrt();
+            let column = eigen.eigenvectors.column(k);
+            z_rows.push((0..n).map(|i| scale * column[i]).collect());
+        }
+    }
+    if z_rows.is_empty() {
+        return Ok(None);
+    }
+
+    // p(x) = (1 - t(x)) / 2, w(x) = (-1 - t(x)) / 2, where t(x) = diff.linear . x
+    // + diff.constant; both share the coefficient vector t(x) / 2, embedded as
+    // `s = b - A x` rows so that `s == p(x)` / `s == w(x)` / `s == z_k(x)`.
+    let half_t: Vec<f64> = diff.linear.iter().map(|c| c / 2.0).collect();
+    let mut a_rows = Vec::with_capacity(z_rows.len() + 2);
+    let mut b_vals = Vec::with_capacity(z_rows.len() + 2);
+    a_rows.push(half_t.clone());
+    b_vals.push((1.0 - diff.constant) / 2.0);
+    a_rows.push(half_t);
+    b_vals.push((-1.0 - diff.constant) / 2.0);
+    for row in z_rows {
+        a_rows.push(row.iter().map(|c| -c).collect());
+        b_vals.push(0.0);
+    }
+    Ok(Some((a_rows, b_vals)))
+}
+
 /// Attempts to solve `problem` by translating it into a conic program and
 /// delegating to `clarabel`. See the crate-level docs and `SPEC-0010` for
 /// the supported problem class.
@@ -401,34 +565,55 @@ pub fn solve(problem: &Problem) -> Solution {
         index.insert(variable.id, i);
     }
 
-    let obj = match linearize(&problem.objective, &index, n) {
+    let obj = match quadratize(&problem.objective, &index, n) {
         Ok(form) => form,
         Err(message) => return error_solution(message),
     };
 
-    // Linearize each constraint into `row.coeffs . x <relation> row.rhs`.
-    let mut rows = Vec::with_capacity(problem.constraints.len());
+    // Reduce each constraint to `diff <relation> 0` (`diff = lhs - rhs`):
+    // affine constraints go into `rows` (unchanged from SPEC-0010), convex
+    // quadratic constraints are reduced to a second-order-cone row block in
+    // `soc_blocks` (SPEC-0011).
+    let mut rows: Vec<(Relation, Vec<f64>, f64)> = Vec::with_capacity(problem.constraints.len());
+    let mut soc_blocks: Vec<SocBlock> = Vec::new();
     for constraint in &problem.constraints {
-        let lhs = match linearize(&constraint.lhs, &index, n) {
+        let lhs = match quadratize(&constraint.lhs, &index, n) {
             Ok(form) => form,
             Err(message) => return error_solution(message),
         };
-        let rhs = match linearize(&constraint.rhs, &index, n) {
+        let rhs = match quadratize(&constraint.rhs, &index, n) {
             Ok(form) => form,
             Err(message) => return error_solution(message),
         };
-        let coeffs: Vec<f64> = lhs
-            .coeffs
-            .iter()
-            .zip(rhs.coeffs.iter())
-            .map(|(l, r)| l - r)
-            .collect();
-        let row_rhs = rhs.constant - lhs.constant;
-        rows.push((constraint.relation, coeffs, row_rhs));
+        let mut diff = lhs.sub(&rhs);
+        let mut relation = constraint.relation;
+
+        if !diff.is_affine() {
+            if relation == Relation::Equal {
+                return error_solution("quadratic equality constraints are not supported");
+            }
+            if relation == Relation::GreaterEqual {
+                diff = diff.negate();
+                relation = Relation::LessEqual;
+            }
+            match build_soc_block(&diff, n) {
+                Ok(Some(block)) => {
+                    soc_blocks.push(block);
+                    continue;
+                }
+                Ok(None) => {
+                    // The quadratic part cancels out numerically; fall
+                    // through to the ordinary affine row below.
+                }
+                Err(message) => return error_solution(message),
+            }
+        }
+
+        rows.push((relation, diff.linear.clone(), -diff.constant));
     }
 
-    // Group rows by cone: equalities first (ZeroConeT), then <= and negated
-    // >= rows together (NonnegativeConeT).
+    // Group affine rows by cone: equalities first (ZeroConeT), then <= and
+    // negated >= rows together (NonnegativeConeT).
     let mut a_rows: Vec<Vec<f64>> = Vec::with_capacity(rows.len());
     let mut b: Vec<f64> = Vec::with_capacity(rows.len());
     let mut num_equal = 0usize;
@@ -458,7 +643,9 @@ pub fn solve(problem: &Problem) -> Solution {
 
     // `clarabel` 0.9's KKT setup does not tolerate a zero-column problem
     // (no decision variables at all); evaluate that degenerate case
-    // directly instead of invoking the solver.
+    // directly instead of invoking the solver. A quadratic (SOC)
+    // constraint can never arise here, since it requires a variable-
+    // dependent product, so `soc_blocks` is always empty when `n == 0`.
     if n == 0 {
         for (relation, _, row_rhs) in &rows {
             let ok = match relation {
@@ -488,11 +675,28 @@ pub fn solve(problem: &Problem) -> Solution {
     if num_ineq > 0 {
         cones.push(NonnegativeConeT(num_ineq));
     }
+    for (block_rows, block_b) in &soc_blocks {
+        a_rows.extend(block_rows.iter().cloned());
+        b.extend(block_b.iter().copied());
+        cones.push(SecondOrderConeT(block_rows.len()));
+    }
 
-    let p_matrix = CscMatrix::<f64>::zeros((n, n));
+    // `clarabel` minimizes `(1/2) x^T P x + q^T x`; for `Maximize`, both `P`
+    // and `q` are negated (`max f(x) = -min(-f(x))`).
+    let p_matrix = if obj.is_affine() {
+        CscMatrix::<f64>::zeros((n, n))
+    } else {
+        let sign = if problem.sense == Sense::Maximize {
+            -1.0
+        } else {
+            1.0
+        };
+        let dense = symmetric_dense(&obj.quad, n, 2.0 * sign, sign);
+        dense_rows_to_csc(&dense, n)
+    };
     let q: Vec<f64> = match problem.sense {
-        Sense::Minimize => obj.coeffs.clone(),
-        Sense::Maximize => obj.coeffs.iter().map(|c| -c).collect(),
+        Sense::Minimize => obj.linear.clone(),
+        Sense::Maximize => obj.linear.iter().map(|c| -c).collect(),
     };
     let a_matrix = dense_rows_to_csc(&a_rows, n);
 
@@ -509,7 +713,12 @@ pub fn solve(problem: &Problem) -> Solution {
         ClarabelStatus::Solved | ClarabelStatus::AlmostSolved => {
             let x = &solver.solution.x;
             let variable_values = x.iter().map(|xi| vec![*xi]).collect();
-            let objective_value = obj.constant + dot(&obj.coeffs, x);
+            let quadratic_value: f64 = obj
+                .quad
+                .iter()
+                .map(|&(i, j, coeff)| coeff * x[i] * x[j])
+                .sum();
+            let objective_value = obj.constant + dot(&obj.linear, x) + quadratic_value;
             Solution {
                 status: SolveStatus::Optimal,
                 objective_value: Some(objective_value),
@@ -542,27 +751,29 @@ mod tests {
         vars.iter().enumerate().map(|(i, v)| (v.id, i)).collect()
     }
 
-    // --- linearization tests ---
+    // --- quadratization tests ---
 
     #[test]
-    fn linearizes_a_constant() {
-        let form = linearize(&Expression::constant(2.5), &HashMap::new(), 0).unwrap();
+    fn quadratizes_a_constant() {
+        let form = quadratize(&Expression::constant(2.5), &HashMap::new(), 0).unwrap();
         assert_eq!(form.constant, 2.5);
-        assert!(form.coeffs.is_empty());
+        assert!(form.linear.is_empty());
+        assert!(form.quad.is_empty());
     }
 
     #[test]
-    fn linearizes_a_single_variable() {
+    fn quadratizes_a_single_variable() {
         let vars = vec![var(1), var(2)];
         let index = index_of(&vars);
-        let form = linearize(&Expression::from_variable(vars[1]), &index, vars.len()).unwrap();
+        let form = quadratize(&Expression::from_variable(vars[1]), &index, vars.len()).unwrap();
         assert_eq!(form.constant, 0.0);
-        assert_eq!(form.coeffs, vec![0.0, 1.0]);
+        assert_eq!(form.linear, vec![0.0, 1.0]);
+        assert!(form.quad.is_empty());
     }
 
     #[test]
-    fn linearizes_a_parameter() {
-        let form = linearize(
+    fn quadratizes_a_parameter() {
+        let form = quadratize(
             &Expression::from_parameter((1, 1), vec![7.0]),
             &HashMap::new(),
             0,
@@ -572,67 +783,67 @@ mod tests {
     }
 
     #[test]
-    fn linearizes_add_and_sub() {
+    fn quadratizes_add_and_sub() {
         let vars = vec![var(1)];
         let index = index_of(&vars);
         let x = Expression::from_variable(vars[0]);
-        let add = linearize(
+        let add = quadratize(
             &Expression::add(x.clone(), Expression::constant(3.0)),
             &index,
             1,
         )
         .unwrap();
         assert_eq!(add.constant, 3.0);
-        assert_eq!(add.coeffs, vec![1.0]);
+        assert_eq!(add.linear, vec![1.0]);
 
-        let sub = linearize(&Expression::sub(Expression::constant(3.0), x), &index, 1).unwrap();
+        let sub = quadratize(&Expression::sub(Expression::constant(3.0), x), &index, 1).unwrap();
         assert_eq!(sub.constant, 3.0);
-        assert_eq!(sub.coeffs, vec![-1.0]);
+        assert_eq!(sub.linear, vec![-1.0]);
     }
 
     #[test]
-    fn linearizes_neg_and_scale() {
+    fn quadratizes_neg_and_scale() {
         let vars = vec![var(1)];
         let index = index_of(&vars);
         let x = Expression::from_variable(vars[0]);
 
-        let neg = linearize(&Expression::neg(x.clone()), &index, 1).unwrap();
-        assert_eq!(neg.coeffs, vec![-1.0]);
+        let neg = quadratize(&Expression::neg(x.clone()), &index, 1).unwrap();
+        assert_eq!(neg.linear, vec![-1.0]);
 
-        let scaled = linearize(&Expression::scale(4.0, x), &index, 1).unwrap();
-        assert_eq!(scaled.coeffs, vec![4.0]);
+        let scaled = quadratize(&Expression::scale(4.0, x), &index, 1).unwrap();
+        assert_eq!(scaled.linear, vec![4.0]);
     }
 
     #[test]
-    fn linearizes_mul_by_constant_either_side() {
+    fn quadratizes_mul_by_constant_either_side() {
         let vars = vec![var(1)];
         let index = index_of(&vars);
         let x = Expression::from_variable(vars[0]);
 
-        let left = linearize(
+        let left = quadratize(
             &Expression::mul(Expression::constant(2.0), x.clone()),
             &index,
             1,
         )
         .unwrap();
-        assert_eq!(left.coeffs, vec![2.0]);
+        assert_eq!(left.linear, vec![2.0]);
 
-        let right = linearize(&Expression::mul(x, Expression::constant(3.0)), &index, 1).unwrap();
-        assert_eq!(right.coeffs, vec![3.0]);
+        let right = quadratize(&Expression::mul(x, Expression::constant(3.0)), &index, 1).unwrap();
+        assert_eq!(right.linear, vec![3.0]);
     }
 
     #[test]
-    fn linearizes_div_by_constant() {
+    fn quadratizes_div_by_constant() {
         let vars = vec![var(1)];
         let index = index_of(&vars);
         let x = Expression::from_variable(vars[0]);
 
-        let form = linearize(&Expression::div(x, Expression::constant(2.0)), &index, 1).unwrap();
-        assert_eq!(form.coeffs, vec![0.5]);
+        let form = quadratize(&Expression::div(x, Expression::constant(2.0)), &index, 1).unwrap();
+        assert_eq!(form.linear, vec![0.5]);
     }
 
     #[test]
-    fn nested_combination_linearizes_correctly() {
+    fn nested_combination_quadratizes_correctly() {
         let vars = vec![var(1), var(2)];
         let index = index_of(&vars);
         let x = Expression::from_variable(vars[0]);
@@ -643,22 +854,59 @@ mod tests {
             Expression::scale(2.0, Expression::sub(x, y)),
             Expression::constant(3.0),
         );
-        let form = linearize(&expr, &index, 2).unwrap();
+        let form = quadratize(&expr, &index, 2).unwrap();
         assert_eq!(form.constant, 3.0);
-        assert_eq!(form.coeffs, vec![2.0, -2.0]);
+        assert_eq!(form.linear, vec![2.0, -2.0]);
+        assert!(form.quad.is_empty());
     }
 
     #[test]
-    fn mul_of_two_variables_is_nonlinear_error() {
+    fn mul_of_two_distinct_variables_is_quadratic() {
         let vars = vec![var(1), var(2)];
         let index = index_of(&vars);
         let x = Expression::from_variable(vars[0]);
         let y = Expression::from_variable(vars[1]);
 
-        let err = linearize(&Expression::mul(x, y), &index, 2).unwrap_err();
+        let form = quadratize(&Expression::mul(x, y), &index, 2).unwrap();
+        assert_eq!(form.constant, 0.0);
+        assert_eq!(form.linear, vec![0.0, 0.0]);
+        assert_eq!(form.quad, vec![(0, 1, 1.0)]);
+    }
+
+    #[test]
+    fn mul_of_a_variable_with_itself_is_quadratic() {
+        let vars = vec![var(1)];
+        let index = index_of(&vars);
+        let x = Expression::from_variable(vars[0]);
+
+        let form = quadratize(&Expression::mul(x.clone(), x), &index, 1).unwrap();
+        assert_eq!(form.quad, vec![(0, 0, 1.0)]);
+    }
+
+    #[test]
+    fn mul_scales_an_existing_quadratic_term() {
+        let vars = vec![var(1), var(2)];
+        let index = index_of(&vars);
+        let x = Expression::from_variable(vars[0]);
+        let y = Expression::from_variable(vars[1]);
+        let xy = Expression::mul(x, y);
+
+        let form = quadratize(&Expression::mul(Expression::constant(3.0), xy), &index, 2).unwrap();
+        assert_eq!(form.quad, vec![(0, 1, 3.0)]);
+    }
+
+    #[test]
+    fn mul_of_three_variable_dependent_terms_is_a_degree_error() {
+        let vars = vec![var(1), var(2)];
+        let index = index_of(&vars);
+        let x = Expression::from_variable(vars[0]);
+        let y = Expression::from_variable(vars[1]);
+        let xy = Expression::mul(x.clone(), y);
+
+        let err = quadratize(&Expression::mul(xy, x), &index, 2).unwrap_err();
         assert_eq!(
             err,
-            "solver only supports linear (affine) objectives and constraints; a product of two variable-dependent terms was found"
+            "solver only supports linear and quadratic (degree <= 2) objectives and constraints; a product of three or more variable-dependent terms was found"
         );
     }
 
@@ -669,16 +917,28 @@ mod tests {
         let x = Expression::from_variable(vars[0]);
         let y = Expression::from_variable(vars[1]);
 
-        let err = linearize(&Expression::div(x, y), &index, 2).unwrap_err();
+        let err = quadratize(&Expression::div(x, y), &index, 2).unwrap_err();
         assert_eq!(
             err,
-            "solver only supports linear (affine) objectives and constraints; division by a variable-dependent term was found"
+            "solver only supports linear or quadratic objectives and constraints; division by a variable-dependent term was found"
         );
     }
 
     #[test]
+    fn div_by_quadratic_constant_scales_quad_term() {
+        let vars = vec![var(1), var(2)];
+        let index = index_of(&vars);
+        let x = Expression::from_variable(vars[0]);
+        let y = Expression::from_variable(vars[1]);
+        let xy = Expression::mul(x, y);
+
+        let form = quadratize(&Expression::div(xy, Expression::constant(2.0)), &index, 2).unwrap();
+        assert_eq!(form.quad, vec![(0, 1, 0.5)]);
+    }
+
+    #[test]
     fn div_by_zero_is_an_error() {
-        let form = linearize(
+        let form = quadratize(
             &Expression::div(Expression::constant(1.0), Expression::constant(0.0)),
             &HashMap::new(),
             0,
@@ -962,6 +1222,189 @@ mod tests {
             }
             other => SolveStatus::Error(format!("solver did not converge: {other:?}")),
         }
+    }
+
+    // --- quadratic solver tests (SPEC-0011) ---
+
+    #[test]
+    fn solves_a_quadratic_objective() {
+        // minimize x^2 + y^2 subject to x + y >= 1
+        let x = scalar_var(1);
+        let y = scalar_var(2);
+        let x_expr = Expression::from_variable(x);
+        let y_expr = Expression::from_variable(y);
+        let problem = Problem {
+            sense: Sense::Minimize,
+            objective: Expression::add(
+                Expression::mul(x_expr.clone(), x_expr.clone()),
+                Expression::mul(y_expr.clone(), y_expr.clone()),
+            ),
+            constraints: vec![Constraint {
+                relation: Relation::GreaterEqual,
+                lhs: Expression::add(x_expr, y_expr),
+                rhs: Expression::constant(1.0),
+            }],
+            variables: vec![x, y],
+        };
+        let solution = solve(&problem);
+        assert_eq!(solution.status, SolveStatus::Optimal);
+        assert!((solution.objective_value.unwrap() - 0.5).abs() < 1e-5);
+        assert!((solution.variable_values[0][0] - 0.5).abs() < 1e-4);
+        assert!((solution.variable_values[1][0] - 0.5).abs() < 1e-4);
+    }
+
+    #[test]
+    fn maximizes_a_concave_quadratic_objective() {
+        // maximize -(x^2 + y^2) subject to x + y == 2 (optimum at x = y = 1)
+        let x = scalar_var(1);
+        let y = scalar_var(2);
+        let x_expr = Expression::from_variable(x);
+        let y_expr = Expression::from_variable(y);
+        let problem = Problem {
+            sense: Sense::Maximize,
+            objective: Expression::neg(Expression::add(
+                Expression::mul(x_expr.clone(), x_expr.clone()),
+                Expression::mul(y_expr.clone(), y_expr.clone()),
+            )),
+            constraints: vec![Constraint {
+                relation: Relation::Equal,
+                lhs: Expression::add(x_expr, y_expr),
+                rhs: Expression::constant(2.0),
+            }],
+            variables: vec![x, y],
+        };
+        let solution = solve(&problem);
+        assert_eq!(solution.status, SolveStatus::Optimal);
+        assert!((solution.objective_value.unwrap() - (-2.0)).abs() < 1e-4);
+        assert!((solution.variable_values[0][0] - 1.0).abs() < 1e-4);
+        assert!((solution.variable_values[1][0] - 1.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn solves_a_quadratic_less_equal_constraint() {
+        // minimize -x subject to x^2 + y^2 <= 1 (optimum at x = 1, y = 0)
+        let x = scalar_var(1);
+        let y = scalar_var(2);
+        let x_expr = Expression::from_variable(x);
+        let y_expr = Expression::from_variable(y);
+        let problem = Problem {
+            sense: Sense::Minimize,
+            objective: Expression::neg(Expression::from_variable(x)),
+            constraints: vec![Constraint {
+                relation: Relation::LessEqual,
+                lhs: Expression::add(
+                    Expression::mul(x_expr.clone(), x_expr),
+                    Expression::mul(y_expr.clone(), y_expr),
+                ),
+                rhs: Expression::constant(1.0),
+            }],
+            variables: vec![x, y],
+        };
+        let solution = solve(&problem);
+        assert_eq!(solution.status, SolveStatus::Optimal);
+        assert!((solution.variable_values[0][0] - 1.0).abs() < 1e-4);
+        assert!(solution.variable_values[1][0].abs() < 1e-4);
+    }
+
+    #[test]
+    fn solves_a_quadratic_greater_equal_constraint() {
+        // minimize -x subject to 1 >= x^2 + y^2 (equivalent to the <= case)
+        let x = scalar_var(1);
+        let y = scalar_var(2);
+        let x_expr = Expression::from_variable(x);
+        let y_expr = Expression::from_variable(y);
+        let problem = Problem {
+            sense: Sense::Minimize,
+            objective: Expression::neg(Expression::from_variable(x)),
+            constraints: vec![Constraint {
+                relation: Relation::GreaterEqual,
+                lhs: Expression::constant(1.0),
+                rhs: Expression::add(
+                    Expression::mul(x_expr.clone(), x_expr),
+                    Expression::mul(y_expr.clone(), y_expr),
+                ),
+            }],
+            variables: vec![x, y],
+        };
+        let solution = solve(&problem);
+        assert_eq!(solution.status, SolveStatus::Optimal);
+        assert!((solution.variable_values[0][0] - 1.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn quadratic_equality_constraint_is_unsupported() {
+        // x^2 == 1
+        let x = scalar_var(1);
+        let x_expr = Expression::from_variable(x);
+        let problem = Problem {
+            sense: Sense::Minimize,
+            objective: Expression::constant(0.0),
+            constraints: vec![Constraint {
+                relation: Relation::Equal,
+                lhs: Expression::mul(x_expr.clone(), x_expr),
+                rhs: Expression::constant(1.0),
+            }],
+            variables: vec![x],
+        };
+        let solution = solve(&problem);
+        assert_eq!(
+            solution.status,
+            SolveStatus::Error("quadratic equality constraints are not supported".to_string())
+        );
+    }
+
+    #[test]
+    fn indefinite_quadratic_constraint_is_rejected_as_non_convex() {
+        // x * y <= 1 (Q has eigenvalues +0.5 / -0.5, not PSD)
+        let x = scalar_var(1);
+        let y = scalar_var(2);
+        let problem = Problem {
+            sense: Sense::Minimize,
+            objective: Expression::constant(0.0),
+            constraints: vec![Constraint {
+                relation: Relation::LessEqual,
+                lhs: Expression::mul(Expression::from_variable(x), Expression::from_variable(y)),
+                rhs: Expression::constant(1.0),
+            }],
+            variables: vec![x, y],
+        };
+        let solution = solve(&problem);
+        assert_eq!(
+            solution.status,
+            SolveStatus::Error(
+                "quadratic constraint is not convex (matrix is not positive semidefinite)"
+                    .to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn cubic_term_in_a_constraint_is_a_degree_error() {
+        // x * x * y <= 1
+        let x = scalar_var(1);
+        let y = scalar_var(2);
+        let x_expr = Expression::from_variable(x);
+        let problem = Problem {
+            sense: Sense::Minimize,
+            objective: Expression::constant(0.0),
+            constraints: vec![Constraint {
+                relation: Relation::LessEqual,
+                lhs: Expression::mul(
+                    Expression::mul(x_expr.clone(), x_expr),
+                    Expression::from_variable(y),
+                ),
+                rhs: Expression::constant(1.0),
+            }],
+            variables: vec![x, y],
+        };
+        let solution = solve(&problem);
+        assert_eq!(
+            solution.status,
+            SolveStatus::Error(
+                "solver only supports linear and quadratic (degree <= 2) objectives and constraints; a product of three or more variable-dependent terms was found"
+                    .to_string()
+            )
+        );
     }
 
     #[test]
