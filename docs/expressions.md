@@ -54,3 +54,7 @@ handles. `scalar` must be a numeric constant.
 - Non-numeric `scalar` in `CVX.SCALE` returns `#VALUE!`.
 - Duplicate names return `#VALUE!`.
 - Diagnostics are logged to `%TEMP%/cvxx.log`.
+
+Use `CVX.DESCRIBE`/`CVX.SHAPE`/`CVX.TYPE` (see [inspection.md](inspection.md))
+to inspect an expression's inferred shape or get a diagnostic rendering of
+it, by handle or by name.

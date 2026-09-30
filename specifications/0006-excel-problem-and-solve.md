@@ -208,6 +208,11 @@ solver is implemented, `solve` always returns
 
 ## Error Handling
 
+- Reusing a name that is already registered under a **different** object
+  table → `#VALUE!` via `CvxError::AmbiguousIdentifier`, per SPEC-0002's
+  cross-table name uniqueness amendment. This check runs before the
+  same-table `DuplicateName` rule below, for all three of this
+  specification's named entries (objective, problem, result).
 - Invalid/unknown objective operand → `#VALUE!` via `CvxError::UnknownIdentifier`.
 - `CVX.PROBLEM` given a handle that is not `cvx:obj:` for its `objective`
   argument → `#VALUE!` via `CvxError::UnknownIdentifier`.
@@ -361,4 +366,9 @@ Implemented as specified, with these notes:
   translated to `#VALUE!` like every other `CvxError` variant.
 - All 87 unit tests pass; `cargo fmt` and `cargo clippy --all-targets` are
   clean.
+
+**2026-09-30 amendment update**: `insert_objective`, `insert_problem`, and
+`insert_result` now reject a name already registered in any other table with
+`CvxError::AmbiguousIdentifier`, per SPEC-0002's cross-table name uniqueness
+amendment; verified by unit tests in `src/core/registry.rs`.
 

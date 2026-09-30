@@ -78,3 +78,8 @@ resolved constraints, ready to pass to the problem builder.
 - An empty constraint set (no resolvable constraints) returns `#VALUE!`.
 - Duplicate names return `#VALUE!`.
 - Diagnostics are logged to `%TEMP%/cvxx.log`.
+
+Use `CVX.DESCRIBE`/`CVX.TYPE` (see [inspection.md](inspection.md)) to get a
+diagnostic description of a constraint or constraint set, by handle or by
+name (constraints and constraint sets have no shape, so `CVX.SHAPE` does
+not apply to them).

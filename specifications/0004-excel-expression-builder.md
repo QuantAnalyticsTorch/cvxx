@@ -95,6 +95,10 @@ All handles follow the pattern `cvx:<kind>:<uuid>`, where `<kind>` for expressio
 
 ## Error Handling
 
+- Reusing a name that is already registered under a **different** object
+  table → `#VALUE!` via `CvxError::AmbiguousIdentifier`, per SPEC-0002's
+  cross-table name uniqueness amendment. This check runs before any of the
+  rules below.
 - Invalid expression syntax → `#VALUE!` with a logged diagnostic.
 - Unknown identifier → `#VALUE!` with a message naming the unresolved identifier.
 - Identifier found but referring to an incompatible object kind (e.g., a problem handle) → `#VALUE!`.
@@ -149,3 +153,8 @@ tests cover parsing, resolution, registry behavior, and handle resolution;
 `cargo fmt` and `cargo clippy --all-targets` are clean. Integration testing
 against a live Excel workbook is still pending and requires a Windows machine
 with Excel installed.
+
+**2026-09-30 amendment update**: `insert_expression` now rejects a name
+already registered in any other table with `CvxError::AmbiguousIdentifier`,
+per SPEC-0002's cross-table name uniqueness amendment; verified by unit tests
+in `src/core/registry.rs`.

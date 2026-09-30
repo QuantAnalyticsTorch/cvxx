@@ -13,6 +13,8 @@ pub enum CvxError {
     InvalidDimension(String),
     #[error("name '{0}' is already registered")]
     DuplicateName(String),
+    #[error("name '{0}' is already registered under a different object type")]
+    AmbiguousIdentifier(String),
     #[error("no entry found for name '{0}'")]
     NameNotFound(String),
     #[error("invalid handle '{0}'")]

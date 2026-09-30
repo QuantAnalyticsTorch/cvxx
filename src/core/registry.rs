@@ -205,6 +205,41 @@ impl Registry {
         INSTANCE.get_or_init(Registry::new)
     }
 
+    /// Checks whether `name` is already registered in any table other than
+    /// `own`, per SPEC-0002's cross-table name uniqueness amendment. Tables
+    /// are checked in a fixed order (matching `HandleKind`'s declaration
+    /// order) to avoid any risk of deadlock from inconsistent lock
+    /// acquisition ordering elsewhere, and each read lock is released
+    /// immediately after it is checked.
+    fn check_name_available(&self, name: &str, own: HandleKind) -> Result<(), CvxError> {
+        macro_rules! check_table {
+            ($field:ident, $kind:expr) => {
+                if own != $kind {
+                    let table = self
+                        .$field
+                        .read()
+                        .map_err(|_| CvxError::Registry("registry lock poisoned".to_string()))?;
+                    let found = table.by_name.contains_key(name);
+                    drop(table);
+                    if found {
+                        return Err(CvxError::AmbiguousIdentifier(name.to_string()));
+                    }
+                }
+            };
+        }
+
+        check_table!(parameters, HandleKind::Param);
+        check_table!(variables, HandleKind::Var);
+        check_table!(expressions, HandleKind::Expr);
+        check_table!(constraints, HandleKind::Constr);
+        check_table!(constraint_sets, HandleKind::ConstrSet);
+        check_table!(objectives, HandleKind::Obj);
+        check_table!(problems, HandleKind::Prob);
+        check_table!(results, HandleKind::Result);
+
+        Ok(())
+    }
+
     /// Inserts a parameter, reusing a cached entry when the same data and
     /// name were already registered. Returns the parameter's handle.
     pub fn insert_parameter(
@@ -213,6 +248,10 @@ impl Registry {
         shape: (usize, usize),
         data: Vec<f64>,
     ) -> Result<String, CvxError> {
+        if let Some(n) = &name {
+            self.check_name_available(n, HandleKind::Param)?;
+        }
+
         let content_hash = content_hash(name.as_deref(), shape, &data);
         let entry_name = name.clone();
 
@@ -250,6 +289,10 @@ impl Registry {
         name: Option<String>,
         shape: (usize, usize),
     ) -> Result<String, CvxError> {
+        if let Some(n) = &name {
+            self.check_name_available(n, HandleKind::Var)?;
+        }
+
         let entry_name = name.clone();
 
         let mut table = self
@@ -296,6 +339,10 @@ impl Registry {
         expression: Expression,
         dependencies: Vec<String>,
     ) -> Result<String, CvxError> {
+        if let Some(n) = &name {
+            self.check_name_available(n, HandleKind::Expr)?;
+        }
+
         let entry_name = name.clone();
 
         let mut table = self
@@ -344,6 +391,10 @@ impl Registry {
         rhs: Expression,
         dependencies: Vec<String>,
     ) -> Result<String, CvxError> {
+        if let Some(n) = &name {
+            self.check_name_available(n, HandleKind::Constr)?;
+        }
+
         let entry_name = name.clone();
 
         let mut table = self
@@ -390,6 +441,10 @@ impl Registry {
         name: Option<String>,
         constraints: Vec<Uuid>,
     ) -> Result<String, CvxError> {
+        if let Some(n) = &name {
+            self.check_name_available(n, HandleKind::ConstrSet)?;
+        }
+
         let entry_name = name.clone();
 
         let mut table = self
@@ -433,6 +488,10 @@ impl Registry {
         expression: Expression,
         dependencies: Vec<String>,
     ) -> Result<String, CvxError> {
+        if let Some(n) = &name {
+            self.check_name_available(n, HandleKind::Obj)?;
+        }
+
         let entry_name = name.clone();
 
         let mut table = self
@@ -477,6 +536,10 @@ impl Registry {
         constraints: Vec<Uuid>,
         variables: Vec<Uuid>,
     ) -> Result<String, CvxError> {
+        if let Some(n) = &name {
+            self.check_name_available(n, HandleKind::Prob)?;
+        }
+
         let entry_name = name.clone();
 
         let mut table = self
@@ -523,6 +586,10 @@ impl Registry {
         objective_value: Option<f64>,
         variable_values: HashMap<Uuid, Vec<f64>>,
     ) -> Result<String, CvxError> {
+        if let Some(n) = &name {
+            self.check_name_available(n, HandleKind::Result)?;
+        }
+
         let entry_name = name.clone();
 
         let mut table = self
@@ -1051,5 +1118,158 @@ mod tests {
         let entry = registry.get_result_by_name("r").unwrap();
         assert_eq!(entry.status, SolveStatus::Unbounded);
         assert!(registry.get_result_by_uuid(first_uuid).is_none());
+    }
+
+    #[test]
+    fn reusing_own_table_name_still_rejects_duplicate_parameter() {
+        // Same-table behavior for content-addressed parameters is
+        // unaffected by the cross-table check: a second parameter named
+        // "x" with different data still fails with `DuplicateName`, not
+        // `AmbiguousIdentifier`.
+        let registry = Registry::new();
+        registry
+            .insert_parameter(Some("x".to_string()), (1, 1), vec![1.0])
+            .unwrap();
+        let err = registry
+            .insert_parameter(Some("x".to_string()), (1, 1), vec![2.0])
+            .unwrap_err();
+        assert_eq!(err, CvxError::DuplicateName("x".to_string()));
+    }
+
+    #[test]
+    fn reusing_own_table_name_still_overwrites_variable() {
+        // Same-table behavior for variables is unaffected: reusing "x" for
+        // another variable still overwrites, per existing convention.
+        let registry = Registry::new();
+        let first = registry
+            .insert_variable(Some("x".to_string()), (1, 1))
+            .unwrap();
+        let second = registry
+            .insert_variable(Some("x".to_string()), (2, 2))
+            .unwrap();
+        assert_ne!(first, second);
+        assert_eq!(registry.get_variable_by_name("x").unwrap().shape, (2, 2));
+    }
+
+    #[test]
+    fn parameter_then_variable_with_same_name_is_ambiguous() {
+        let registry = Registry::new();
+        registry
+            .insert_parameter(Some("x".to_string()), (1, 1), vec![1.0])
+            .unwrap();
+        let err = registry
+            .insert_variable(Some("x".to_string()), (1, 1))
+            .unwrap_err();
+        assert_eq!(err, CvxError::AmbiguousIdentifier("x".to_string()));
+    }
+
+    #[test]
+    fn variable_then_expression_with_same_name_is_ambiguous() {
+        let registry = Registry::new();
+        registry
+            .insert_variable(Some("x".to_string()), (1, 1))
+            .unwrap();
+        let err = registry
+            .insert_expression(Some("x".to_string()), Expression::constant(1.0), vec![])
+            .unwrap_err();
+        assert_eq!(err, CvxError::AmbiguousIdentifier("x".to_string()));
+    }
+
+    #[test]
+    fn expression_then_constraint_with_same_name_is_ambiguous() {
+        let registry = Registry::new();
+        registry
+            .insert_expression(Some("x".to_string()), Expression::constant(1.0), vec![])
+            .unwrap();
+        let err = registry
+            .insert_constraint(
+                Some("x".to_string()),
+                Relation::LessEqual,
+                Expression::constant(1.0),
+                Expression::constant(2.0),
+                vec![],
+            )
+            .unwrap_err();
+        assert_eq!(err, CvxError::AmbiguousIdentifier("x".to_string()));
+    }
+
+    #[test]
+    fn constraint_then_objective_with_same_name_is_ambiguous() {
+        let registry = Registry::new();
+        registry
+            .insert_constraint(
+                Some("x".to_string()),
+                Relation::LessEqual,
+                Expression::constant(1.0),
+                Expression::constant(2.0),
+                vec![],
+            )
+            .unwrap();
+        let err = registry
+            .insert_objective(
+                Some("x".to_string()),
+                Sense::Minimize,
+                Expression::constant(1.0),
+                vec![],
+            )
+            .unwrap_err();
+        assert_eq!(err, CvxError::AmbiguousIdentifier("x".to_string()));
+    }
+
+    #[test]
+    fn objective_then_problem_with_same_name_is_ambiguous() {
+        let registry = Registry::new();
+        registry
+            .insert_objective(
+                Some("x".to_string()),
+                Sense::Minimize,
+                Expression::constant(1.0),
+                vec![],
+            )
+            .unwrap();
+        let err = registry
+            .insert_problem(Some("x".to_string()), Uuid::new_v4(), vec![], vec![])
+            .unwrap_err();
+        assert_eq!(err, CvxError::AmbiguousIdentifier("x".to_string()));
+    }
+
+    #[test]
+    fn problem_then_result_with_same_name_is_ambiguous() {
+        let registry = Registry::new();
+        registry
+            .insert_problem(Some("x".to_string()), Uuid::new_v4(), vec![], vec![])
+            .unwrap();
+        let err = registry
+            .insert_result(
+                Some("x".to_string()),
+                Uuid::new_v4(),
+                SolveStatus::Optimal,
+                Some(1.0),
+                HashMap::new(),
+            )
+            .unwrap_err();
+        assert_eq!(err, CvxError::AmbiguousIdentifier("x".to_string()));
+    }
+
+    #[test]
+    fn constraint_set_then_parameter_with_same_name_is_ambiguous() {
+        let registry = Registry::new();
+        registry
+            .insert_constraint_set(Some("x".to_string()), vec![Uuid::new_v4()])
+            .unwrap();
+        let err = registry
+            .insert_parameter(Some("x".to_string()), (1, 1), vec![1.0])
+            .unwrap_err();
+        assert_eq!(err, CvxError::AmbiguousIdentifier("x".to_string()));
+    }
+
+    #[test]
+    fn unnamed_entries_never_collide_across_tables() {
+        let registry = Registry::new();
+        registry
+            .insert_parameter(Some("x".to_string()), (1, 1), vec![1.0])
+            .unwrap();
+        // Unnamed variable insertion is unaffected by any existing name.
+        registry.insert_variable(None, (1, 1)).unwrap();
     }
 }

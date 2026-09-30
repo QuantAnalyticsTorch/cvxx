@@ -28,6 +28,10 @@ input is invalid.
 | `=CVX.VARIABLE(1, 5, "y")` | 5-element row vector named `y` |
 | `=CVX.VARIABLE(3, 4, "Z")` | 3×4 matrix variable named `Z` |
 
+Use `CVX.DESCRIBE`/`CVX.SHAPE`/`CVX.TYPE` (see [inspection.md](inspection.md))
+to inspect a variable's shape or get a diagnostic description of it, by
+handle or by name.
+
 ## Error conditions
 
 - Non-numeric, zero, negative, or non-integer `rows`/`cols` return `#VALUE!`.

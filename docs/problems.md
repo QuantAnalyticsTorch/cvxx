@@ -75,3 +75,22 @@ a descriptive error and return `#VALUE!` (no result is stored):
   result entry with that status, same as `Optimal`.
 - Duplicate names return `#VALUE!`.
 - Diagnostics are logged to `%TEMP%/cvxx.log`.
+
+## Inspecting results
+
+Once `CVX.SOLVE` returns a result handle, use:
+
+```excel
+=CVX.STATUS(result)
+=CVX.OBJECTIVE_VALUE(result)
+=CVX.VALUE(result, variable)
+```
+
+to read back the solve status, the objective value, and each variable's
+solved value(s) (a scalar for a `(1, 1)` variable, a row-major array
+otherwise). `CVX.OBJECTIVE_VALUE` and `CVX.VALUE` return `#VALUE!` for a
+non-`Optimal` result, since no objective/variable values are stored for
+`Infeasible`/`Unbounded` outcomes. `CVX.DESCRIBE`/`CVX.TYPE` (see
+[inspection.md](inspection.md)) also work on result, problem, and objective
+handles, alongside every other object kind. See
+[inspection.md](inspection.md) for full details.

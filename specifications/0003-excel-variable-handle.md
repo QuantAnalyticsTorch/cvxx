@@ -56,6 +56,10 @@ All handles follow the pattern `cvx:<kind>:<uuid>`, where `<kind>` for variables
 
 ## Error Handling
 
+- Reusing a name that is already registered under a **different** object
+  table (e.g. an existing parameter) → `#VALUE!` via the new
+  `CvxError::AmbiguousIdentifier`, per SPEC-0002's cross-table name
+  uniqueness amendment. This check runs before any of the rules below.
 - Non-integer, zero, negative, or non-numeric `rows`/`cols` → `#VALUE!`.
 - `rows` or `cols` exceeding a defined implementation limit → `#VALUE!` with a logged diagnostic.
 - Duplicate name → `#VALUE!` with message indicating the conflict.
@@ -98,3 +102,8 @@ tests cover variable registry operations and dimension validation; `cargo fmt`
 and `cargo clippy --all-targets` are clean. Integration testing against a live
 Excel workbook is still pending and requires a Windows machine with Excel
 installed.
+
+**2026-09-30 amendment update**: `insert_variable` now rejects a name already
+registered in any other table with `CvxError::AmbiguousIdentifier`, per
+SPEC-0002's cross-table name uniqueness amendment; verified by unit tests in
+`src/core/registry.rs`.

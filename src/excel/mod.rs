@@ -3,6 +3,7 @@
 
 pub mod constraint;
 pub mod expression;
+pub mod inspect;
 pub mod parameter;
 pub mod problem;
 pub mod variable;
@@ -240,6 +241,63 @@ pub extern "system" fn xlAutoOpen() -> i32 {
             "Handle or name of a problem created by CVX.PROBLEM.",
             "Optional unique name for the result.",
         ],
+    );
+
+    reg.add(
+        "CVX.VALUE",
+        "QQQ$",
+        "result, variable",
+        "cvxx",
+        "Returns a solved variable's value(s) from a cvxx result.",
+        &[
+            "Handle or name of a result created by CVX.SOLVE.",
+            "Handle or name of a variable that was part of the solved problem.",
+        ],
+    );
+
+    reg.add(
+        "CVX.STATUS",
+        "QQ$",
+        "result",
+        "cvxx",
+        "Returns the solve status of a cvxx result as a string.",
+        &["Handle or name of a result created by CVX.SOLVE."],
+    );
+
+    reg.add(
+        "CVX.OBJECTIVE_VALUE",
+        "QQ$",
+        "result",
+        "cvxx",
+        "Returns the objective value of an optimal cvxx result.",
+        &["Handle or name of a result created by CVX.SOLVE."],
+    );
+
+    reg.add(
+        "CVX.DESCRIBE",
+        "QQ$",
+        "handle",
+        "cvxx",
+        "Describes any cvxx registry object (parameter, variable, expression, constraint, constraint set, objective, problem, or result) as a diagnostic string.",
+        &["Handle or name of any cvxx registry object."],
+    );
+
+    reg.add(
+        "CVX.SHAPE",
+        "QQ$",
+        "handle",
+        "cvxx",
+        "Returns the \"rows x cols\" shape of a cvxx parameter, variable, or expression.",
+        &["Handle or name of a parameter, variable, or expression."],
+    );
+
+    reg.add(
+        "CVX.TYPE",
+        "QQ$",
+        "handle",
+        "cvxx",
+        "Returns the type name of any cvxx registry object.",
+        &["Handle or name of any cvxx registry object."],
     );
 
     1

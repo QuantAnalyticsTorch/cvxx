@@ -168,6 +168,10 @@ SPEC-0002. Two new `HandleKind` variants are added:
 
 ## Error Handling
 
+- Reusing a name that is already registered under a **different** object
+  table → `#VALUE!` via `CvxError::AmbiguousIdentifier`, per SPEC-0002's
+  cross-table name uniqueness amendment. This check runs before the
+  same-table `DuplicateName` rule below.
 - Invalid constraint string syntax (missing or duplicated relational
   operator, malformed operand) → `#VALUE!` with a logged diagnostic via
   `CvxError::InvalidExpression`.
@@ -293,3 +297,8 @@ resolution, registry behavior, and handle resolution, for 71 total; `cargo
 fmt` and `cargo clippy --all-targets` are clean. Integration testing against
 a live Excel workbook is still pending and requires a Windows machine with
 Excel installed.
+
+**2026-09-30 amendment update**: `insert_constraint` and
+`insert_constraint_set` now reject a name already registered in any other
+table with `CvxError::AmbiguousIdentifier`, per SPEC-0002's cross-table name
+uniqueness amendment; verified by unit tests in `src/core/registry.rs`.
