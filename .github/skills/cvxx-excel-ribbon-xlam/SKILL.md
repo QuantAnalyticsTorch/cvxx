@@ -27,5 +27,7 @@ Define how to build and maintain the Excel macro-enabled add-in (`cvxx.xlam`) th
    - Ensure examples use the current `CVX.*` function names.
 
 5. **Distribution**
-   - Build the XLAM from source files in `xlam/`.
+   - `cvxx.xlam` is created and maintained manually in Excel (ribbon XML injected via a tool such as the Custom UI Editor, VBA callbacks written directly in the VBE); it is never generated from source files by a build step.
+   - After each manual edit, export the ribbon XML and every VBA module as plain text into `xlam/source/` (e.g. `xlam/source/customUI.xml`, `xlam/source/*.bas`) purely so changes are reviewable in diffs; these exports are not consumed by any build and must be re-imported manually if the XLAM is rebuilt from scratch.
+   - Commit the binary `cvxx.xlam` itself under `assets/`.
    - Version the XLAM to match the Rust XLL.

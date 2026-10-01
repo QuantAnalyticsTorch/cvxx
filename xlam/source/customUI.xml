@@ -1,0 +1,54 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<!--
+  Ribbon XML for cvxx.xlam. This file is NOT consumed by any build step.
+  It is a human-readable export kept for diff/review purposes only; the
+  actual customUI part must be injected into cvxx.xlam manually with a
+  tool such as the Custom UI Editor (https://github.com/fernandreu/office-ribbonx-editor).
+
+  Groups:
+    1. Examples    - dynamic menu listing every workbook under docs/examples/
+    2. Docs        - opens the offline HTML documentation in the browser
+    3. Support &amp; Feedback (optional) - email support / open a GitHub issue
+-->
+<customUI xmlns="http://schemas.microsoft.com/office/2009/07/customui" onLoad="OnRibbonLoad">
+  <ribbon>
+    <tabs>
+      <tab id="tabCvxx" label="cvxx">
+        <group id="grpExamples" label="Examples">
+          <dynamicMenu id="menuExamples"
+                       label="Open Example"
+                       size="large"
+                       imageMso="FileOpen"
+                       getContent="Examples_GetContent"
+                       screentip="Example workbooks"
+                       supertip="Open one of the bundled example workbooks from docs/examples." />
+        </group>
+        <group id="grpDocs" label="Documentation">
+          <button id="btnDocs"
+                  label="Help"
+                  size="large"
+                  imageMso="Help"
+                  onAction="Docs_OnAction"
+                  screentip="Open documentation"
+                  supertip="Open the offline cvxx function reference in your default browser." />
+        </group>
+        <group id="grpSupport" label="Support &amp; Feedback">
+          <button id="btnEmailSupport"
+                  label="Email Support"
+                  size="large"
+                  imageMso="Mail"
+                  onAction="Support_OnAction"
+                  screentip="Email support"
+                  supertip="Send an email to the cvxx support address." />
+          <button id="btnReportIssue"
+                  label="Report Issue"
+                  size="large"
+                  imageMso="Warning"
+                  onAction="Feedback_OnAction"
+                  screentip="Report an issue"
+                  supertip="Open a new issue on the cvxx GitHub repository." />
+        </group>
+      </tab>
+    </tabs>
+  </ribbon>
+</customUI>
