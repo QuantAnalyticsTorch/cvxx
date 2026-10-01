@@ -54,10 +54,13 @@ Returns:
   (its handle, name if any, and kind-specific content). Truncated to 500
   characters (`"... (truncated)"` appended) for very large objects, such as
   parameters with many data points. This output is for diagnostics only and
-  is not guaranteed to round-trip through `CVX.EXPRESSION`'s parser —
-  original Excel-facing identifier names are not recoverable from a stored
-  expression, so variables are shown as `var#<id>` and parameters as
-  `param(<rows>x<cols>)`.
+  is not guaranteed to round-trip through `CVX.EXPRESSION`'s parser. A
+  variable or parameter referenced by a formula (in an expression,
+  constraint, or objective) is shown by its current registered name when it
+  has one, else by its structural placeholder (`var#<id>` or
+  `param(<rows>x<cols>)`) — for example, `"total": expression 1x1 =
+  ("x") * ("x") + var#7` shows the named variable `x` twice and an
+  unnamed variable as `var#7`.
 - `CVX.SHAPE`: `"<rows>x<cols>"`, only for parameters, variables, and
   expressions (an expression's shape is inferred from its structure).
 - `CVX.TYPE`: one of `"parameter"`, `"variable"`, `"expression"`,

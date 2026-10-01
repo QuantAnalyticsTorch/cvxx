@@ -43,6 +43,10 @@ pub enum Expression {
     Variable(Variable),
     /// A reference to a parameter (dense numeric data).
     Parameter {
+        /// Identity distinguishing this parameter reference from any
+        /// other, even one of the same shape and data. Not used by the
+        /// solver; read only for display purposes by `cvxx`.
+        id: u64,
         shape: (usize, usize),
         data: Vec<f64>,
     },
@@ -71,9 +75,9 @@ impl Expression {
         Expression::Variable(variable)
     }
 
-    /// Creates a parameter expression.
-    pub fn from_parameter(shape: (usize, usize), data: Vec<f64>) -> Self {
-        Expression::Parameter { shape, data }
+    /// Creates a parameter expression with the given opaque identity.
+    pub fn from_parameter(id: u64, shape: (usize, usize), data: Vec<f64>) -> Self {
+        Expression::Parameter { id, shape, data }
     }
 
     /// Creates an addition expression.
@@ -774,7 +778,7 @@ mod tests {
     #[test]
     fn quadratizes_a_parameter() {
         let form = quadratize(
-            &Expression::from_parameter((1, 1), vec![7.0]),
+            &Expression::from_parameter(1, (1, 1), vec![7.0]),
             &HashMap::new(),
             0,
         )
@@ -970,7 +974,7 @@ mod tests {
     fn non_scalar_parameter_is_a_shape_error() {
         let problem = Problem {
             sense: Sense::Minimize,
-            objective: Expression::from_parameter((2, 1), vec![1.0, 2.0]),
+            objective: Expression::from_parameter(1, (2, 1), vec![1.0, 2.0]),
             constraints: Vec::new(),
             variables: Vec::new(),
         };

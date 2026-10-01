@@ -2,9 +2,18 @@
 id: SPEC-0012
 title: Prefer registered names over handles in CVX.DESCRIBE output
 issue: ISSUE-0012
-status: draft
+status: implemented
 created: 2026-09-30
 ---
+
+## Status
+
+Implemented in `src/excel/inspect.rs`: added `primary_identifier` and
+`display_ref` helpers, updated `describe` and the `ConstraintSet`/`Problem`
+arms of `describe_body` to use them. Added unit tests covering named/unnamed
+objects and mixed named/unnamed cross-references. `cargo fmt`, `cargo
+clippy --all-targets -- -D warnings`, and `cargo test --lib` all pass (128
+tests).
 
 ## Objective
 

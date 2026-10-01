@@ -179,14 +179,52 @@ fn status_str(status: &SolveStatus) -> &'static str {
 
 const MAX_DESCRIBE_LEN: usize = 500;
 
+/// Formats `obj`'s primary, human-readable identifier: its registered name
+/// if it has one, else its handle. Used both for the leading identifier in
+/// `describe()` and, via `display_ref`, for references to other objects
+/// inside `describe_body`.
+fn primary_identifier(obj: &RegistryObject) -> String {
+    obj.name()
+        .map(|name| format!("\"{name}\""))
+        .unwrap_or_else(|| format_handle(obj.kind(), obj.uuid()))
+}
+
+/// Resolves `uuid` (known to be of kind `kind`) to its registry entry and
+/// returns its name (quoted, as in `primary_identifier`) if it has one,
+/// else its handle. Falls back to the handle if the entry has since been
+/// removed from the registry (should not normally occur, since referenced
+/// objects are not independently deletable — see Error Handling).
+fn display_ref(kind: HandleKind, uuid: Uuid) -> String {
+    let name = match kind {
+        HandleKind::Constr => Registry::global()
+            .get_constraint_by_uuid(uuid)
+            .and_then(|e| e.name),
+        HandleKind::Var => Registry::global()
+            .get_variable_by_uuid(uuid)
+            .and_then(|e| e.name),
+        HandleKind::Obj => Registry::global()
+            .get_objective_by_uuid(uuid)
+            .and_then(|e| e.name),
+        _ => None, // only the three referenced kinds above are ever passed in
+    };
+    match name {
+        Some(name) => format!("\"{name}\""),
+        None => format_handle(kind, uuid),
+    }
+}
+
 fn describe(obj: &RegistryObject) -> String {
+    let primary = primary_identifier(obj);
     let handle = format_handle(obj.kind(), obj.uuid());
-    let name_suffix = obj
-        .name()
-        .map(|name| format!(" (\"{name}\")"))
-        .unwrap_or_default();
+    // Only show the handle a second time when it isn't already the primary
+    // identifier (i.e. only when the object has a name).
+    let handle_suffix = if obj.name().is_some() {
+        format!(" ({handle})")
+    } else {
+        String::new()
+    };
     let body = describe_body(obj);
-    truncate_describe(format!("{handle}{name_suffix}: {body}"))
+    truncate_describe(format!("{primary}{handle_suffix}: {body}"))
 }
 
 fn truncate_describe(text: String) -> String {
@@ -217,22 +255,22 @@ fn describe_body(obj: &RegistryObject) -> String {
             };
             format!(
                 "expression {shape_part} = {}",
-                render_expression(&e.expression)
+                render_expression(&e.expression, Registry::global())
             )
         }
         RegistryObject::Constraint(e) => {
             let op = relation_str(e.relation);
             format!(
                 "constraint: {} {op} {}",
-                render_expression(&e.lhs),
-                render_expression(&e.rhs)
+                render_expression(&e.lhs, Registry::global()),
+                render_expression(&e.rhs, Registry::global())
             )
         }
         RegistryObject::ConstraintSet(e) => {
             let handles = e
                 .constraints
                 .iter()
-                .map(|uuid| format_handle(HandleKind::Constr, *uuid))
+                .map(|uuid| display_ref(HandleKind::Constr, *uuid))
                 .collect::<Vec<_>>()
                 .join(", ");
             format!(
@@ -245,20 +283,23 @@ fn describe_body(obj: &RegistryObject) -> String {
                 Sense::Minimize => "minimize",
                 Sense::Maximize => "maximize",
             };
-            format!("objective {sense}: {}", render_expression(&e.expression))
+            format!(
+                "objective {sense}: {}",
+                render_expression(&e.expression, Registry::global())
+            )
         }
         RegistryObject::Problem(e) => {
-            let obj_handle = format_handle(HandleKind::Obj, e.objective);
+            let obj_handle = display_ref(HandleKind::Obj, e.objective);
             let c_handles = e
                 .constraints
                 .iter()
-                .map(|uuid| format_handle(HandleKind::Constr, *uuid))
+                .map(|uuid| display_ref(HandleKind::Constr, *uuid))
                 .collect::<Vec<_>>()
                 .join(", ");
             let v_handles = e
                 .variables
                 .iter()
-                .map(|uuid| format_handle(HandleKind::Var, *uuid))
+                .map(|uuid| display_ref(HandleKind::Var, *uuid))
                 .collect::<Vec<_>>()
                 .join(", ");
             format!(
@@ -626,7 +667,7 @@ mod tests {
         let obj = resolve_any(&handle).unwrap();
         assert_eq!(
             describe(&obj),
-            format!("{handle} (\"describe_param\"): parameter 1x2, data=[1, 2]")
+            format!("\"describe_param\" ({handle}): parameter 1x2, data=[1, 2]")
         );
     }
 
@@ -654,9 +695,188 @@ mod tests {
         assert_eq!(
             describe(&obj),
             format!(
-                "{handle} (\"describe_expr\"): expression 1x1 = var#{}",
+                "\"describe_expr\" ({handle}): expression 1x1 = var#{}",
                 variable_entry.variable.id
             )
+        );
+    }
+
+    #[test]
+    fn primary_identifier_prefers_name_over_handle() {
+        let handle = Registry::global()
+            .insert_variable(Some("primary_named".to_string()), (1, 1))
+            .unwrap();
+        let obj = resolve_any(&handle).unwrap();
+        assert_eq!(primary_identifier(&obj), "\"primary_named\"");
+    }
+
+    #[test]
+    fn primary_identifier_falls_back_to_handle_without_name() {
+        let handle = Registry::global().insert_variable(None, (1, 1)).unwrap();
+        let obj = resolve_any(&handle).unwrap();
+        assert_eq!(primary_identifier(&obj), handle);
+    }
+
+    #[test]
+    fn display_ref_prefers_name_over_handle() {
+        let handle = Registry::global()
+            .insert_variable(Some("display_ref_named".to_string()), (1, 1))
+            .unwrap();
+        let (kind, uuid) = parse_handle(&handle).unwrap();
+        assert_eq!(display_ref(kind, uuid), "\"display_ref_named\"");
+    }
+
+    #[test]
+    fn display_ref_falls_back_to_handle_without_name() {
+        let handle = Registry::global().insert_variable(None, (1, 1)).unwrap();
+        let (kind, uuid) = parse_handle(&handle).unwrap();
+        assert_eq!(display_ref(kind, uuid), handle);
+    }
+
+    #[test]
+    fn constraint_set_describe_mixes_named_and_unnamed_members() {
+        let named_var = Registry::global().insert_variable(None, (1, 1)).unwrap();
+        let named_var_entry = Registry::global()
+            .get_variable_by_uuid(parse_handle(&named_var).unwrap().1)
+            .unwrap();
+        let named_constr = Registry::global()
+            .insert_constraint(
+                Some("named_constr".to_string()),
+                AstRelation::LessEqual,
+                Expression::from_variable(named_var_entry.variable),
+                Expression::constant(1.0),
+                vec![named_var.clone()],
+            )
+            .unwrap();
+        let unnamed_constr = Registry::global()
+            .insert_constraint(
+                None,
+                AstRelation::LessEqual,
+                Expression::from_variable(named_var_entry.variable),
+                Expression::constant(2.0),
+                vec![named_var],
+            )
+            .unwrap();
+        let (_, named_uuid) = parse_handle(&named_constr).unwrap();
+        let (_, unnamed_uuid) = parse_handle(&unnamed_constr).unwrap();
+        let set_handle = Registry::global()
+            .insert_constraint_set(None, vec![named_uuid, unnamed_uuid])
+            .unwrap();
+        let obj = resolve_any(&set_handle).unwrap();
+        assert_eq!(
+            describe(&obj),
+            format!(
+                "{set_handle}: constraint_set: [2 constraint(s)]: \"named_constr\", {unnamed_constr}"
+            )
+        );
+    }
+
+    #[test]
+    fn problem_describe_mixes_named_and_unnamed_references() {
+        let objective = Registry::global()
+            .insert_objective(
+                Some("named_objective".to_string()),
+                Sense::Minimize,
+                Expression::constant(1.0),
+                vec![],
+            )
+            .unwrap();
+        let (_, objective_uuid) = parse_handle(&objective).unwrap();
+        let var = Registry::global().insert_variable(None, (1, 1)).unwrap();
+        let variable_entry = Registry::global()
+            .get_variable_by_uuid(parse_handle(&var).unwrap().1)
+            .unwrap();
+        let constr = Registry::global()
+            .insert_constraint(
+                None,
+                AstRelation::LessEqual,
+                Expression::from_variable(variable_entry.variable),
+                Expression::constant(1.0),
+                vec![var.clone()],
+            )
+            .unwrap();
+        let (_, constr_uuid) = parse_handle(&constr).unwrap();
+        let problem = Registry::global()
+            .insert_problem(
+                None,
+                objective_uuid,
+                vec![constr_uuid],
+                vec![variable_entry.uuid],
+            )
+            .unwrap();
+        let obj = resolve_any(&problem).unwrap();
+        assert_eq!(
+            describe(&obj),
+            format!(
+                "{problem}: problem: objective=\"named_objective\", constraints=[1]: {constr}, variables=[1]: {var}"
+            )
+        );
+    }
+
+    #[test]
+    fn expression_body_prefers_names_for_variables_and_parameters() {
+        let x = Registry::global()
+            .insert_variable(Some("x".to_string()), (1, 1))
+            .unwrap();
+        let x_entry = Registry::global()
+            .get_variable_by_uuid(parse_handle(&x).unwrap().1)
+            .unwrap();
+        let y = Registry::global().insert_variable(None, (1, 1)).unwrap();
+        let y_entry = Registry::global()
+            .get_variable_by_uuid(parse_handle(&y).unwrap().1)
+            .unwrap();
+
+        // "x" * "x" + var#<y>
+        let expr = Expression::add(
+            Expression::mul(
+                Expression::from_variable(x_entry.variable),
+                Expression::from_variable(x_entry.variable),
+            ),
+            Expression::from_variable(y_entry.variable),
+        );
+        let handle = Registry::global()
+            .insert_expression(Some("total".to_string()), expr, vec![x, y])
+            .unwrap();
+        let obj = resolve_any(&handle).unwrap();
+        assert_eq!(
+            describe(&obj),
+            format!(
+                "\"total\" ({handle}): expression 1x1 = (\"x\") * (\"x\") + var#{}",
+                y_entry.variable.id
+            )
+        );
+    }
+
+    #[test]
+    fn constraint_body_prefers_names_for_both_operands() {
+        let var = Registry::global()
+            .insert_variable(Some("x".to_string()), (1, 1))
+            .unwrap();
+        let var_entry = Registry::global()
+            .get_variable_by_uuid(parse_handle(&var).unwrap().1)
+            .unwrap();
+        let param_handle = Registry::global()
+            .insert_parameter(Some("budget".to_string()), (1, 1), vec![10.0])
+            .unwrap();
+        let (_, param_uuid) = parse_handle(&param_handle).unwrap();
+
+        let handle = Registry::global()
+            .insert_constraint(
+                None,
+                AstRelation::LessEqual,
+                Expression::from_variable(var_entry.variable),
+                Expression::from_parameter(
+                    crate::core::registry::parameter_id(param_uuid),
+                    (1, 1),
+                    vec![10.0],
+                ),
+                vec![var, param_handle],
+            )
+            .unwrap();
+        let obj = resolve_any(&handle).unwrap();
+        assert_eq!(
+            describe(&obj),
+            format!("{handle}: constraint: \"x\" <= \"budget\"")
         );
     }
 

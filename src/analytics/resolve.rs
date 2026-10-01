@@ -6,7 +6,7 @@ use std::collections::HashSet;
 use crate::analytics::ast::{Constraint, Expr, ExprNode, Relation};
 use crate::core::error::CvxError;
 use crate::core::handle::{parse_handle, HandleKind};
-use crate::core::registry::Registry;
+use crate::core::registry::{parameter_id, Registry};
 use cvxrust::Expression;
 
 /// A resolved expression together with the registry handles it depends on.
@@ -114,7 +114,11 @@ impl<'a> Resolver<'a> {
         // tables.
         if let Some(entry) = self.registry.get_parameter_by_name(name) {
             self.dependencies.insert(name.to_string());
-            return Ok(Expression::from_parameter(entry.shape, entry.data));
+            return Ok(Expression::from_parameter(
+                parameter_id(entry.uuid),
+                entry.shape,
+                entry.data,
+            ));
         }
 
         if let Some(entry) = self.registry.get_variable_by_name(name) {
@@ -139,7 +143,11 @@ impl<'a> Resolver<'a> {
                     .get_parameter_by_uuid(uuid)
                     .ok_or_else(|| CvxError::UnknownIdentifier(handle.to_string()))?;
                 self.dependencies.insert(handle.to_string());
-                Ok(Expression::from_parameter(entry.shape, entry.data))
+                Ok(Expression::from_parameter(
+                    parameter_id(entry.uuid),
+                    entry.shape,
+                    entry.data,
+                ))
             }
             HandleKind::Var => {
                 let entry = self
@@ -177,13 +185,14 @@ mod tests {
         registry
             .insert_parameter(Some("A".to_string()), (1, 1), vec![2.0])
             .unwrap();
+        let param_uuid = registry.get_parameter_by_name("A").unwrap().uuid;
 
         let ast = parse("A").unwrap();
         let resolved = resolve_expr(&registry, &ast).unwrap();
 
         assert_eq!(
             resolved.expression,
-            Expression::from_parameter((1, 1), vec![2.0])
+            Expression::from_parameter(parameter_id(param_uuid), (1, 1), vec![2.0])
         );
         assert_eq!(resolved.dependencies, vec!["A".to_string()]);
     }
@@ -212,6 +221,7 @@ mod tests {
             .insert_variable(Some("x".to_string()), (1, 1))
             .unwrap();
         let variable = registry.get_variable_by_name("x").unwrap().variable;
+        let param_uuid = registry.get_parameter_by_name("A").unwrap().uuid;
 
         let ast = parse("2.5 * (A - x)").unwrap();
         let resolved = resolve_expr(&registry, &ast).unwrap();
@@ -221,7 +231,7 @@ mod tests {
             Expression::mul(
                 Expression::constant(2.5),
                 Expression::sub(
-                    Expression::from_parameter((1, 1), vec![1.0]),
+                    Expression::from_parameter(parameter_id(param_uuid), (1, 1), vec![1.0]),
                     Expression::from_variable(variable)
                 )
             )
@@ -250,13 +260,17 @@ mod tests {
             .insert_parameter(Some("b".to_string()), (1, 1), vec![10.0])
             .unwrap();
         let variable = registry.get_variable_by_name("x").unwrap().variable;
+        let param_uuid = registry.get_parameter_by_name("b").unwrap().uuid;
 
         let constraint = parse_constraint("x <= b").unwrap();
         let resolved = resolve_constraint(&registry, &constraint).unwrap();
 
         assert_eq!(resolved.relation, Relation::LessEqual);
         assert_eq!(resolved.lhs, Expression::from_variable(variable));
-        assert_eq!(resolved.rhs, Expression::from_parameter((1, 1), vec![10.0]));
+        assert_eq!(
+            resolved.rhs,
+            Expression::from_parameter(parameter_id(param_uuid), (1, 1), vec![10.0])
+        );
         let mut deps = resolved.dependencies;
         deps.sort();
         assert_eq!(deps, vec!["b".to_string(), "x".to_string()]);

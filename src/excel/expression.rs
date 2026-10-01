@@ -7,7 +7,7 @@ use crate::analytics::parser;
 use crate::analytics::resolve::resolve_expr;
 use crate::core::error::CvxError;
 use crate::core::handle::{parse_handle, HandleKind};
-use crate::core::registry::Registry;
+use crate::core::registry::{parameter_id, Registry};
 use crate::data;
 use cvxrust::Expression;
 
@@ -155,7 +155,7 @@ pub(crate) fn resolve_handle_arg(arg: LPXLOPER12) -> Result<Expression, CvxError
         match kind {
             HandleKind::Param => registry
                 .get_parameter_by_uuid(uuid)
-                .map(|e| Expression::from_parameter(e.shape, e.data))
+                .map(|e| Expression::from_parameter(parameter_id(e.uuid), e.shape, e.data))
                 .ok_or_else(|| CvxError::UnknownIdentifier(text.clone())),
             HandleKind::Var => registry
                 .get_variable_by_uuid(uuid)
@@ -175,7 +175,11 @@ pub(crate) fn resolve_handle_arg(arg: LPXLOPER12) -> Result<Expression, CvxError
         // Allow referencing named objects by name as a convenience.
         let registry = Registry::global();
         if let Some(entry) = registry.get_parameter_by_name(&text) {
-            return Ok(Expression::from_parameter(entry.shape, entry.data));
+            return Ok(Expression::from_parameter(
+                parameter_id(entry.uuid),
+                entry.shape,
+                entry.data,
+            ));
         }
         if let Some(entry) = registry.get_variable_by_name(&text) {
             return Ok(Expression::from_variable(entry.variable));
@@ -197,7 +201,11 @@ mod tests {
             .insert_parameter(Some("A".to_string()), (1, 1), vec![5.0])
             .unwrap();
         let expr = resolve_handle_for_test(&handle).unwrap();
-        assert_eq!(expr, Expression::from_parameter((1, 1), vec![5.0]));
+        let (_, uuid) = parse_handle(&handle).unwrap();
+        assert_eq!(
+            expr,
+            Expression::from_parameter(parameter_id(uuid), (1, 1), vec![5.0])
+        );
     }
 
     #[test]
@@ -221,7 +229,7 @@ mod tests {
         match kind {
             HandleKind::Param => registry
                 .get_parameter_by_uuid(uuid)
-                .map(|e| Expression::from_parameter(e.shape, e.data))
+                .map(|e| Expression::from_parameter(parameter_id(e.uuid), e.shape, e.data))
                 .ok_or_else(|| CvxError::UnknownIdentifier(handle.to_string())),
             HandleKind::Var => registry
                 .get_variable_by_uuid(uuid)

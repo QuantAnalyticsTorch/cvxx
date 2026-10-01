@@ -280,6 +280,20 @@ impl Registry {
         self.parameters.read().ok()?.get_by_name(name)
     }
 
+    /// Finds the parameter entry whose derived `cvxrust`-level identity
+    /// (`parameter_id`) is `id`, if one currently exists. Diagnostic-only
+    /// (SPEC-0013); a linear scan is sufficient since this is not
+    /// performance-critical.
+    pub fn get_parameter_by_parameter_id(&self, id: u64) -> Option<ParameterEntry> {
+        self.parameters
+            .read()
+            .ok()?
+            .by_uuid
+            .values()
+            .find(|e| parameter_id(e.uuid) == id)
+            .cloned()
+    }
+
     /// Inserts a variable with the requested shape and optional name. Two
     /// calls with no name always create distinct entries. Reusing a name
     /// overwrites the previous variable so Excel formulas can be edited
@@ -327,6 +341,19 @@ impl Registry {
 
     pub fn get_variable_by_name(&self, name: &str) -> Option<VariableEntry> {
         self.variables.read().ok()?.get_by_name(name)
+    }
+
+    /// Finds the variable entry whose `cvxrust`-level identity is `id`, if
+    /// one currently exists. Diagnostic-only (SPEC-0013); a linear scan is
+    /// sufficient since this is not performance-critical.
+    pub fn get_variable_by_variable_id(&self, id: u64) -> Option<VariableEntry> {
+        self.variables
+            .read()
+            .ok()?
+            .by_uuid
+            .values()
+            .find(|e| e.variable.id == id)
+            .cloned()
     }
 
     /// Inserts an expression. Expressions are distinct objects even when
@@ -643,6 +670,13 @@ fn content_hash(name: Option<&str>, shape: (usize, usize), data: &[f64]) -> u64 
     hasher.finish()
 }
 
+/// Derives the opaque `cvxrust` identity for the parameter stored at
+/// `uuid`, by the same convention already used for `cvxrust::Variable::id`
+/// (the uuid's first 64 bits).
+pub(crate) fn parameter_id(uuid: Uuid) -> u64 {
+    uuid.as_u64_pair().0
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -701,6 +735,25 @@ mod tests {
     }
 
     #[test]
+    fn finds_parameter_by_parameter_id() {
+        let registry = Registry::new();
+        let handle = registry
+            .insert_parameter(Some("p".to_string()), (1, 1), vec![1.0])
+            .unwrap();
+        let (_, uuid) = crate::core::handle::parse_handle(&handle).unwrap();
+        let entry = registry
+            .get_parameter_by_parameter_id(parameter_id(uuid))
+            .unwrap();
+        assert_eq!(entry.name.as_deref(), Some("p"));
+    }
+
+    #[test]
+    fn get_parameter_by_parameter_id_returns_none_for_unknown_id() {
+        let registry = Registry::new();
+        assert!(registry.get_parameter_by_parameter_id(12345).is_none());
+    }
+
+    #[test]
     fn inserts_and_looks_up_variable_by_uuid() {
         let registry = Registry::new();
         let handle = registry
@@ -746,6 +799,46 @@ mod tests {
         let first = registry.insert_variable(None, (2, 2)).unwrap();
         let second = registry.insert_variable(None, (2, 2)).unwrap();
         assert_ne!(first, second);
+    }
+
+    #[test]
+    fn finds_variable_by_variable_id() {
+        let registry = Registry::new();
+        let handle = registry
+            .insert_variable(Some("x".to_string()), (1, 1))
+            .unwrap();
+        let (_, uuid) = crate::core::handle::parse_handle(&handle).unwrap();
+        let variable_id = registry.get_variable_by_uuid(uuid).unwrap().variable.id;
+        let entry = registry.get_variable_by_variable_id(variable_id).unwrap();
+        assert_eq!(entry.name.as_deref(), Some("x"));
+    }
+
+    #[test]
+    fn get_variable_by_variable_id_returns_none_for_unknown_id() {
+        let registry = Registry::new();
+        assert!(registry.get_variable_by_variable_id(12345).is_none());
+    }
+
+    #[test]
+    fn get_variable_by_variable_id_returns_none_after_name_reused() {
+        let registry = Registry::new();
+        let first = registry
+            .insert_variable(Some("x".to_string()), (1, 1))
+            .unwrap();
+        let (_, first_uuid) = crate::core::handle::parse_handle(&first).unwrap();
+        let first_variable_id = registry
+            .get_variable_by_uuid(first_uuid)
+            .unwrap()
+            .variable
+            .id;
+
+        registry
+            .insert_variable(Some("x".to_string()), (2, 2))
+            .unwrap();
+
+        assert!(registry
+            .get_variable_by_variable_id(first_variable_id)
+            .is_none());
     }
 
     #[test]

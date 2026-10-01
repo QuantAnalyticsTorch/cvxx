@@ -4,6 +4,7 @@
 //! (SPEC-0010).
 
 use crate::core::error::CvxError;
+use crate::core::registry::Registry;
 use cvxrust::Expression;
 
 /// Infers the `(rows, cols)` shape of an `Expression` for display purposes
@@ -38,19 +39,46 @@ fn broadcast_shape(a: (usize, usize), b: (usize, usize)) -> Result<(usize, usize
 
 /// Renders an `Expression` as a fully-parenthesized diagnostic string for
 /// `CVX.DESCRIBE`. Not guaranteed to round-trip through `CVX.EXPRESSION`'s
-/// parser; original Excel-facing identifier names are not recoverable, so
-/// variables/parameters are shown structurally instead.
-pub fn render_expression(expr: &Expression) -> String {
+/// parser. A `Variable`/`Parameter` leaf shows its current registered name
+/// (quoted), when `registry` has one, else the structural placeholder
+/// (SPEC-0013).
+pub fn render_expression(expr: &Expression, registry: &Registry) -> String {
     match expr {
         Expression::Constant(c) => format!("{c}"),
-        Expression::Variable(v) => format!("var#{}", v.id),
-        Expression::Parameter { shape, .. } => format!("param({}x{})", shape.0, shape.1),
-        Expression::Add(l, r) => format!("{} + {}", render_expression(l), render_expression(r)),
-        Expression::Sub(l, r) => format!("{} - ({})", render_expression(l), render_expression(r)),
-        Expression::Mul(l, r) => format!("({}) * ({})", render_expression(l), render_expression(r)),
-        Expression::Div(l, r) => format!("({}) / ({})", render_expression(l), render_expression(r)),
-        Expression::Neg(e) => format!("-({})", render_expression(e)),
-        Expression::Scale { scalar, expr } => format!("{scalar} * ({})", render_expression(expr)),
+        Expression::Variable(v) => registry
+            .get_variable_by_variable_id(v.id)
+            .and_then(|e| e.name)
+            .map(|name| format!("\"{name}\""))
+            .unwrap_or_else(|| format!("var#{}", v.id)),
+        Expression::Parameter { id, shape, .. } => registry
+            .get_parameter_by_parameter_id(*id)
+            .and_then(|e| e.name)
+            .map(|name| format!("\"{name}\""))
+            .unwrap_or_else(|| format!("param({}x{})", shape.0, shape.1)),
+        Expression::Add(l, r) => format!(
+            "{} + {}",
+            render_expression(l, registry),
+            render_expression(r, registry)
+        ),
+        Expression::Sub(l, r) => format!(
+            "{} - ({})",
+            render_expression(l, registry),
+            render_expression(r, registry)
+        ),
+        Expression::Mul(l, r) => format!(
+            "({}) * ({})",
+            render_expression(l, registry),
+            render_expression(r, registry)
+        ),
+        Expression::Div(l, r) => format!(
+            "({}) / ({})",
+            render_expression(l, registry),
+            render_expression(r, registry)
+        ),
+        Expression::Neg(e) => format!("-({})", render_expression(e, registry)),
+        Expression::Scale { scalar, expr } => {
+            format!("{scalar} * ({})", render_expression(expr, registry))
+        }
     }
 }
 
@@ -75,7 +103,7 @@ mod tests {
 
     #[test]
     fn infers_bare_parameter_shape() {
-        let param = Expression::from_parameter((3, 1), vec![1.0, 2.0, 3.0]);
+        let param = Expression::from_parameter(1, (3, 1), vec![1.0, 2.0, 3.0]);
         assert_eq!(infer_shape(&param).unwrap(), (3, 1));
     }
 
@@ -124,28 +152,76 @@ mod tests {
 
     #[test]
     fn renders_each_node_kind() {
-        assert_eq!(render_expression(&Expression::constant(1.5)), "1.5");
-        assert_eq!(render_expression(&var(3, (1, 1))), "var#3");
+        let registry = Registry::new();
         assert_eq!(
-            render_expression(&Expression::from_parameter((2, 2), vec![0.0; 4])),
+            render_expression(&Expression::constant(1.5), &registry),
+            "1.5"
+        );
+        assert_eq!(render_expression(&var(3, (1, 1)), &registry), "var#3");
+        assert_eq!(
+            render_expression(
+                &Expression::from_parameter(2, (2, 2), vec![0.0; 4]),
+                &registry
+            ),
             "param(2x2)"
         );
         assert_eq!(
-            render_expression(&Expression::neg(Expression::constant(1.0))),
+            render_expression(&Expression::neg(Expression::constant(1.0)), &registry),
             "-(1)"
         );
         assert_eq!(
-            render_expression(&Expression::scale(2.0, Expression::constant(3.0))),
+            render_expression(
+                &Expression::scale(2.0, Expression::constant(3.0)),
+                &registry
+            ),
             "2 * (3)"
         );
     }
 
     #[test]
     fn renders_nested_combination() {
+        let registry = Registry::new();
         let expr = Expression::add(
             Expression::mul(Expression::constant(2.0), var(1, (1, 1))),
             Expression::neg(Expression::constant(1.0)),
         );
-        assert_eq!(render_expression(&expr), "(2) * (var#1) + -(1)");
+        assert_eq!(render_expression(&expr, &registry), "(2) * (var#1) + -(1)");
+    }
+
+    #[test]
+    fn renders_registered_variable_and_parameter_by_name() {
+        let registry = Registry::new();
+        registry
+            .insert_variable(Some("x".to_string()), (1, 1))
+            .unwrap();
+        let variable = registry.get_variable_by_name("x").unwrap().variable;
+        let param_handle = registry
+            .insert_parameter(Some("budget".to_string()), (1, 1), vec![1.0])
+            .unwrap();
+        let (_, param_uuid) = crate::core::handle::parse_handle(&param_handle).unwrap();
+
+        let expr = Expression::from_variable(variable);
+        assert_eq!(render_expression(&expr, &registry), "\"x\"");
+
+        let param_expr = Expression::from_parameter(
+            crate::core::registry::parameter_id(param_uuid),
+            (1, 1),
+            vec![1.0],
+        );
+        assert_eq!(render_expression(&param_expr, &registry), "\"budget\"");
+    }
+
+    #[test]
+    fn renders_same_reference_consistently_when_repeated() {
+        let registry = Registry::new();
+        registry
+            .insert_variable(Some("x".to_string()), (1, 1))
+            .unwrap();
+        let variable = registry.get_variable_by_name("x").unwrap().variable;
+        let expr = Expression::mul(
+            Expression::from_variable(variable),
+            Expression::from_variable(variable),
+        );
+        assert_eq!(render_expression(&expr, &registry), "(\"x\") * (\"x\")");
     }
 }
