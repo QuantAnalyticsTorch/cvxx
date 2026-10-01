@@ -13,8 +13,8 @@ Option Explicit
 
 Private gRibbon As IRibbonUI
 
-Private Const SUPPORT_EMAIL As String = "support@example.com"
-Private Const ISSUE_URL As String = "https://github.com/<org>/cvxx/issues/new"
+Private Const SUPPORT_EMAIL As String = "quant.analytics.torch@gmail.com"
+Private Const ISSUE_URL As String = "https://github.com/QuantAnalyticsTorch/cvxx/issues"
 
 ' --- Ribbon lifecycle -------------------------------------------------
 
