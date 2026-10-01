@@ -1,12 +1,32 @@
 # cvxx
 
-`cvxx` is an Excel add-in that exposes convex optimization capabilities to Excel worksheets through a Rust implementation built on top of `cvxrust`. Numerical solving inside `cvxrust` is delegated to [`clarabel`](https://crates.io/crates/clarabel), a pure-Rust conic (LP/QP) solver, which is the standing solver framework for this project. It consists of:
+`cvxx` brings disciplined convex optimization straight into Excel. Define variables, expressions, and constraints with simple `CVX.*` worksheet formulas, solve the resulting problem, and read the results back into your spreadsheet — no external solver, no copy-pasting results from another tool.
 
-- A Rust dynamic-link library (DLL/XLL) that registers optimization functions with Excel via [`xladd`](https://github.com/MathiasPius/xladd) and the `XLOPER12` API.
-- An Excel macro-enabled add-in (`cvxx.xlam`) that provides a ribbon tab with documentation links, examples, and helper utilities.
-- Documentation, example workbooks, and narrative notebooks stored under `docs/`.
+## Getting Started
 
-## Goals
+1. **Download the latest release.** Once `cvxx` reaches `v1.0.0`, each [GitHub Release](../../releases) publishes a single `cvxx-{version}.zip` archive containing everything you need: `cvxx.xll`, `cvxx.xlam`, offline documentation, and example workbooks.
+2. **Extract the zip** to a folder of your choice.
+3. **Unblock the files** (Windows marks downloaded files as untrusted): in PowerShell, `Get-ChildItem -Recurse | Unblock-File`.
+4. **Load the add-ins in Excel**: `File` → `Options` → `Add-ins` → `Manage: Excel Add-ins` → `Go…` → `Browse…` and select both `cvxx.xll` and `cvxx.xlam` from the extracted folder.
+5. **Open an example workbook** from the `docs/examples/` folder, or click the `cvxx` ribbon tab's **Examples** button to open one directly from Excel.
+6. **Browse the documentation** via the ribbon's **Help** button (opens the bundled offline docs), or read it online under [`docs/`](docs/).
+
+> Pre-`v1.0.0`, there is no published release yet — see [Building From Source](#building-from-source) below.
+
+## What You Get
+
+- `CVX.VARIABLE`, `CVX.PARAMETER`, `CVX.EXPRESSION`, and `CVX.CONSTRAINT` to build up a problem from worksheet cells and ranges.
+- `CVX.PROBLEM` / `CVX.SOLVE` to assemble and solve it, backed by [`clarabel`](https://crates.io/crates/clarabel), a pure-Rust conic (LP/QP) solver.
+- `CVX.STATUS`, `CVX.OBJECTIVE_VALUE`, `CVX.VALUE`, and `CVX.DESCRIBE` to read back solve status, objective value, and variable values.
+- A `cvxx` ribbon tab with example workbooks, offline help, and (optionally) support/feedback links.
+
+See [docs/](docs/) for the full function reference, or the ribbon's **Help** button for the same content offline.
+
+## Building From Source
+
+> This section will be expanded once the release pipeline (`ISSUE-0001`) is complete. For now, build the XLL locally with `cargo build --release` (produces `target/release/cvxx.xll`) and build `cvxx.xlam` following [.github/skills/cvxx-excel-ribbon-xlam/SKILL.md](.github/skills/cvxx-excel-ribbon-xlam/SKILL.md).
+
+## Project Goals
 
 - Make disciplined convex optimization available directly from Excel formulas.
 - Keep all numerical work in safe, performant Rust code.
@@ -44,7 +64,9 @@ cvxx/
 ├── issues/                  # Business requirements (created by the business analyst agent)
 ├── specifications/          # Technical specifications (created by the technical analyst agent)
 ├── docs/                    # User and developer documentation, example notebooks
-├── src/                     # Rust source code (to be added)
+├── xlam/                    # Reviewable ribbon XML / VBA source and build tooling for cvxx.xlam
+├── assets/                  # Committed binary artifacts (cvxx.xlam)
+├── src/                     # Rust source code
 │   ├── excel/               # XLL registration and XLOPER12 adapters
 │   ├── data/                # Excel-to-Rust data parsing and validation
 │   ├── core/                # Handle registry, identifiers, object lifetimes
@@ -54,16 +76,12 @@ cvxx/
 └── LICENSE
 ```
 
-## Workflow
+## Development Workflow
 
 1. Business requirements are captured as Markdown issues in `issues/`.
 2. Each issue is refined into one or more technical specifications in `specifications/`.
 3. Specifications are implemented by the developer agent as Rust code, tests, and documentation.
 4. The architect agent continuously reviews the overall architecture and consistency.
-
-## Getting Started
-
-> This section will be expanded once the initial build infrastructure is in place.
 
 ## License
 
