@@ -1,0 +1,80 @@
+name: Release
+
+# Validation-only: per SPEC-0001, the XLL is built and the XLAM is created
+# locally by the maintainer (scripts/package-release.ps1), never in CI, so
+# this workflow validates the tag/version/docs and drafts a GitHub Release
+# for the maintainer to attach the locally assembled cvxx-{version}.zip to.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+env:
+  MDBOOK_VERSION: "0.5.4"
+
+jobs:
+  validate-and-draft:
+    name: Validate tag and draft GitHub Release
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Verify tag matches Cargo.toml version
+        shell: pwsh
+        run: ./scripts/check-tag-matches-version.ps1 -Tag '${{ github.ref_name }}'
+
+      - name: Install Rust (stable, x86_64-pc-windows-msvc)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+          components: rustfmt, clippy
+
+      - name: cargo fmt --check
+        run: cargo fmt --all -- --check
+
+      - name: cargo clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: cargo test
+        run: cargo test --workspace
+
+      - name: Setup mdBook
+        uses: peaceiris/actions-mdbook@v2
+        with:
+          mdbook-version: ${{ env.MDBOOK_VERSION }}
+
+      - name: Build and validate docs/html
+        shell: pwsh
+        run: |
+          mdbook build docs
+          if ($LASTEXITCODE -ne 0) { throw "mdbook build failed" }
+          ./scripts/check-docs-links.ps1
+
+      - name: Draft GitHub Release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $tag = '${{ github.ref_name }}'
+          $version = $tag.TrimStart('v')
+          $isPrerelease = $tag -match '-'
+
+          $notes = @(
+            "Validated by CI: cargo fmt/clippy/test passed, docs/html rendered with no broken internal links, and the tag matches Cargo.toml's package.version ($version).",
+            "",
+            "This draft has no attached assets yet. Build the release archive locally and attach it before publishing:",
+            "",
+            '```powershell',
+            '.\scripts\package-release.ps1',
+            '```',
+            "",
+            "Then upload the resulting dist\cvxx-$version.zip (containing cvxx.xll, cvxx.xlam, docs/html/, docs/examples/, INSTALL.md, SHA256SUMS.txt) to this draft release."
+          ) -join "`n"
+
+          $ghArgs = @('release', 'create', $tag, '--draft', '--title', $tag, '--notes', $notes)
+          if ($isPrerelease) { $ghArgs += '--prerelease' }
+
+          gh @ghArgs

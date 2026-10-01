@@ -1,0 +1,87 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  MDBOOK_VERSION: "0.5.4"
+
+jobs:
+  rust:
+    name: Rust (fmt, clippy, test, build)
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Check version.txt is in sync with Cargo.toml (warns only)
+        shell: pwsh
+        run: ./scripts/check-version-sync.ps1
+
+      - name: Install Rust (stable, x86_64-pc-windows-msvc)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+          components: rustfmt, clippy
+
+      - name: Cache cargo registry and build artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: cargo fmt --check
+        run: cargo fmt --all -- --check
+
+      - name: cargo clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: cargo test
+        run: cargo test --workspace
+
+      - name: cargo build --release (produces target/release/cvxx.xll)
+        run: cargo build --release
+
+  docs:
+    name: Docs (mdbook)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup mdBook
+        uses: peaceiris/actions-mdbook@v2
+        with:
+          mdbook-version: ${{ env.MDBOOK_VERSION }}
+
+      - name: Build docs/html
+        run: mdbook build docs
+
+      - name: Verify docs/html is non-empty and has an index.html
+        shell: pwsh
+        run: |
+          if (-not (Test-Path docs/html -PathType Container)) { throw "docs/html was not generated" }
+          if (-not (Test-Path docs/html/index.html -PathType Leaf) -or (Get-Item docs/html/index.html).Length -eq 0) {
+            throw "docs/html/index.html is missing or empty"
+          }
+
+      - name: Check internal documentation links
+        shell: pwsh
+        run: ./scripts/check-docs-links.ps1
+
+  tag-version-alignment:
+    name: Tag/version alignment
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Verify tag matches Cargo.toml version
+        shell: pwsh
+        run: ./scripts/check-tag-matches-version.ps1 -Tag '${{ github.ref_name }}'

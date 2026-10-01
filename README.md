@@ -11,6 +11,8 @@
 5. **Open an example workbook** from the `docs/examples/` folder, or click the `cvxx` ribbon tab's **Examples** button to open one directly from Excel.
 6. **Browse the documentation** via the ribbon's **Help** button (opens the bundled offline docs), or read it online under [`docs/`](docs/).
 
+See [INSTALL.md](INSTALL.md) for the full install/trust walkthrough, including how to unblock unsigned add-ins and verify the archive's `SHA256SUMS.txt`.
+
 > Pre-`v1.0.0`, there is no published release yet — see [Building From Source](#building-from-source) below.
 
 ## What You Get
@@ -24,7 +26,62 @@ See [docs/](docs/) for the full function reference, or the ribbon's **Help** but
 
 ## Building From Source
 
-> This section will be expanded once the release pipeline (`ISSUE-0001`) is complete. For now, build the XLL locally with `cargo build --release` (produces `target/release/cvxx.xll`) and build `cvxx.xlam` following [.github/skills/cvxx-excel-ribbon-xlam/SKILL.md](.github/skills/cvxx-excel-ribbon-xlam/SKILL.md).
+### Versioning
+
+The canonical version lives in `Cargo.toml`'s `package.version`. A `build.rs`
+step regenerates `version.txt` at the repository root from that value on
+every `cargo build`, so non-Rust tooling (the packaging script below) can
+read the version without invoking `cargo`. Release tags use
+`v{major}.{minor}.{patch}` (optionally `-prerelease`, e.g. `v0.5.0-beta.1`)
+and must match `Cargo.toml` exactly — CI enforces this on every tagged push.
+
+### Build the XLL
+
+```powershell
+cargo build --release   # produces target/release/cvxx.xll
+```
+
+`cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets -- -D
+warnings`, and `cargo test --workspace` must all pass; the same three
+commands run in [`.github/workflows/ci.yml`](.github/workflows/ci.yml) on
+every push and pull request, on a `windows-latest` GitHub-hosted runner
+(target: `x86_64-pc-windows-msvc` only).
+
+### Build `cvxx.xlam`
+
+Follow [.github/skills/cvxx-excel-ribbon-xlam/SKILL.md](.github/skills/cvxx-excel-ribbon-xlam/SKILL.md)
+and commit the result under `assets/cvxx.xlam`. The XLAM is built manually
+in Excel, never in CI.
+
+### Render the offline docs
+
+```powershell
+mdbook build docs   # produces docs/html/ from docs/*.md (docs/book.toml, docs/SUMMARY.md)
+```
+
+`docs/html/` is a generated, git-ignored build artifact (same as `target/`),
+rebuilt by CI (`.github/workflows/ci.yml`) and by the packaging step below.
+It renders `docs/*.md` into a styled, searchable static site that opens
+directly from disk — no local web server or network access required.
+
+### Assemble a release archive
+
+Once you have built `target/release/cvxx.xll`, `assets/cvxx.xlam`, and
+`docs/html/`, assemble the `cvxx-{version}.zip` release archive (with a
+`SHA256SUMS.txt` checksum file) with:
+
+```powershell
+.\scripts\package-release.ps1
+```
+
+This fails loudly if any required input (XLL, XLAM, `docs/html/`,
+`docs/examples/`, `INSTALL.md`) is missing or empty, and writes
+`dist\cvxx-{version}.zip`. Pushing a `v{version}` tag runs
+[`.github/workflows/release.yml`](.github/workflows/release.yml), which
+validates the tag against `Cargo.toml`, re-runs the full CI validation
+(including the docs build), and drafts a GitHub Release for the version —
+attach the locally assembled archive to that draft and publish it. No step
+of the pipeline builds the XLAM or signs any binary.
 
 ## Project Goals
 
@@ -60,10 +117,19 @@ cvxx/
 ├── .github/
 │   ├── agents/              # AI agent definitions
 │   ├── skills/              # Shared skill instructions
+│   ├── workflows/           # CI (ci.yml) and release-draft (release.yml) GitHub Actions
 │   └── copilot-instructions.md
 ├── issues/                  # Business requirements (created by the business analyst agent)
 ├── specifications/          # Technical specifications (created by the technical analyst agent)
 ├── docs/                    # User and developer documentation, example notebooks
+│   ├── book.toml            # mdbook config (renders docs/*.md into docs/html/)
+│   ├── SUMMARY.md           # mdbook table of contents
+│   └── html/                # Generated, git-ignored offline docs site (not committed)
+├── scripts/                 # Release/versioning tooling (PowerShell)
+│   ├── package-release.ps1       # Assembles dist/cvxx-{version}.zip
+│   ├── check-version-sync.ps1    # Warns if version.txt is stale vs. Cargo.toml
+│   ├── check-tag-matches-version.ps1  # Fails if a release tag != Cargo.toml version
+│   └── check-docs-links.ps1      # Fails on broken docs/*.md links or unrendered pages
 ├── xlam/                    # Reviewable ribbon XML / VBA source and build tooling for cvxx.xlam
 ├── assets/                  # Committed binary artifacts (cvxx.xlam)
 ├── src/                     # Rust source code
@@ -72,6 +138,9 @@ cvxx/
 │   ├── core/                # Handle registry, identifiers, object lifetimes
 │   └── analytics/           # cvxrust problem construction and solvers
 ├── tests/                   # Rust and integration tests (to be added)
+├── build.rs                 # Regenerates version.txt from Cargo.toml on every build
+├── version.txt              # Generated, committed copy of the current version
+├── INSTALL.md               # Install/trust instructions for unsigned add-ins
 ├── README.md                # This file
 └── LICENSE
 ```

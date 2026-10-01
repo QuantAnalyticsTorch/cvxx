@@ -1,0 +1,25 @@
+[book]
+title = "cvxx Documentation"
+description = "Offline reference for the cvxx Excel convex optimization add-in"
+authors = ["cvxx contributors"]
+language = "en"
+src = "."
+
+[build]
+# Rendered into docs/html, matching SPEC-0001's release archive layout.
+build-dir = "html"
+create-missing = false
+
+[output.html]
+default-theme = "light"
+preferred-dark-theme = "navy"
+git-repository-url = "https://github.com/QuantAnalyticsTorch/cvxx"
+edit-url-template = "https://github.com/QuantAnalyticsTorch/cvxx/edit/main/docs/{path}"
+no-section-label = false
+# Offline-only: no CDN fonts/CSS/JS, no fetch of remote resources.
+smart-punctuation = true
+
+[output.html.search]
+enable = true
+limit-results = 20
+use-boolean-and = true

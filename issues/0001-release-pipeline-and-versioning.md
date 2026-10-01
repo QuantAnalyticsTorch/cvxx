@@ -2,7 +2,7 @@
 id: ISSUE-0001
 title: Release pipeline and versioning for cvxx binaries
 priority: must
-status: draft
+status: done
 created: 2026-09-29
 ---
 
@@ -23,13 +23,13 @@ Establish a versioning and release pipeline that:
 
 ## Acceptance Criteria
 
-- [ ] A single source of truth for the project version exists and is documented.
-- [ ] The Rust XLL builds locally for 64-bit Excel with a documented one-line command.
-- [ ] A GitHub Actions workflow validates every PR and tag (`cargo test`, `cargo clippy`, `cargo fmt`, and tag/version alignment).
-- [ ] `docs/*.md` is rendered into a static, styled HTML site (CSS + optional minimal JS for navigation/search, no network calls required) under `docs/html/`, generated as part of the release build rather than hand-written.
-- [ ] GitHub Releases from `v1.0.0` onward host a single `.zip` archive containing `cvxx.xll`, `cvxx.xlam`, `docs/html/`, `docs/examples/`, and a checksum file; no MSI/EXE installer or code-signed installer is required.
-- [ ] README or docs explain how to unblock and trust unsigned Excel add-ins, and how to extract and use the release archive.
-- [ ] No release depends on code signing or secret-holding infrastructure.
+- [x] A single source of truth for the project version exists and is documented.
+- [x] The Rust XLL builds locally for 64-bit Excel with a documented one-line command.
+- [x] A GitHub Actions workflow validates every PR and tag (`cargo test`, `cargo clippy`, `cargo fmt`, and tag/version alignment).
+- [x] `docs/*.md` is rendered into a static, styled HTML site (CSS + optional minimal JS for navigation/search, no network calls required) under `docs/html/`, generated as part of the release build rather than hand-written.
+- [x] GitHub Releases from `v1.0.0` onward host a single `.zip` archive containing `cvxx.xll`, `cvxx.xlam`, `docs/html/`, `docs/examples/`, and a checksum file; no MSI/EXE installer or code-signed installer is required.
+- [x] README or docs explain how to unblock and trust unsigned Excel add-ins, and how to extract and use the release archive.
+- [x] No release depends on code signing or secret-holding infrastructure.
 
 ## Notes
 

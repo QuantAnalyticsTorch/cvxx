@@ -2,7 +2,7 @@
 id: SPEC-0001
 title: Release pipeline and versioning for cvxx binaries
 issue: ISSUE-0001
-status: draft
+status: implemented
 created: 2026-09-29
 ---
 
