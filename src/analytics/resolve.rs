@@ -101,6 +101,51 @@ impl<'a> Resolver<'a> {
                 let expr = self.resolve(operand)?;
                 Ok(Expression::neg(expr))
             }
+            Expr::Call { name, args } => self.resolve_call(name, args),
+        }
+    }
+
+    /// Resolves a function-call-syntax node. Only `sum`/`index` are
+    /// recognized (SPEC-0015); any other name is an error.
+    fn resolve_call(&mut self, name: &str, args: &[ExprNode]) -> Result<Expression, CvxError> {
+        match name {
+            "sum" => {
+                if args.len() != 1 {
+                    return Err(CvxError::InvalidExpression(format!(
+                        "sum() takes exactly 1 argument, got {}",
+                        args.len()
+                    )));
+                }
+                let operand = self.resolve(&args[0])?;
+                Ok(Expression::sum(operand))
+            }
+            "index" => {
+                if args.len() != 3 && args.len() != 5 {
+                    return Err(CvxError::InvalidExpression(format!(
+                        "index() takes exactly 3 or 5 arguments, got {}",
+                        args.len()
+                    )));
+                }
+                let operand = self.resolve(&args[0])?;
+                let row = literal_dimension(&args[1])?;
+                let col = literal_dimension(&args[2])?;
+                let rows = if args.len() == 5 {
+                    literal_dimension(&args[3])?
+                } else {
+                    1
+                };
+                let cols = if args.len() == 5 {
+                    literal_dimension(&args[4])?
+                } else {
+                    1
+                };
+                let operand_shape = crate::analytics::shape::infer_shape(&operand)?;
+                crate::analytics::shape::check_index_bounds(operand_shape, row, col, rows, cols)?;
+                Ok(Expression::index(operand, row - 1, col - 1, rows, cols))
+            }
+            other => Err(CvxError::InvalidExpression(format!(
+                "unknown function '{other}'"
+            ))),
         }
     }
 
@@ -171,6 +216,24 @@ impl<'a> Resolver<'a> {
             | HandleKind::Prob
             | HandleKind::Result => Err(CvxError::UnknownIdentifier(handle.to_string())),
         }
+    }
+}
+
+/// Reads a bare numeric-literal argument (e.g. `index()`'s `row`/`col`/
+/// `rows`/`cols`) as a positive integer. Identifiers, arithmetic, and
+/// non-integer or non-positive numbers are all rejected — these arguments
+/// are positions/counts, never registry references, mirroring
+/// `CVX.INDEX`'s own `row`/`col`/`rows`/`cols` (`data::parse_dimension`,
+/// SPEC-0015).
+fn literal_dimension(node: &ExprNode) -> Result<usize, CvxError> {
+    match node.as_ref() {
+        Expr::Constant(value) if value.fract() == 0.0 && *value >= 1.0 => Ok(*value as usize),
+        Expr::Constant(_) => Err(CvxError::InvalidExpression(
+            "index() row/col/rows/cols arguments must be positive integers".to_string(),
+        )),
+        _ => Err(CvxError::InvalidExpression(
+            "index() row/col/rows/cols arguments must be numeric literals".to_string(),
+        )),
     }
 }
 
@@ -285,6 +348,179 @@ mod tests {
         assert_eq!(
             resolve_constraint(&registry, &constraint).unwrap_err(),
             CvxError::UnknownIdentifier("foo".to_string())
+        );
+    }
+
+    // --- sum(...)/index(...) grammar tests (SPEC-0015) ---
+
+    #[test]
+    fn resolves_sum_call_to_the_same_expression_as_the_functional_builder() {
+        let registry = Registry::new();
+        registry
+            .insert_variable(Some("v".to_string()), (3, 1))
+            .unwrap();
+        let variable = registry.get_variable_by_name("v").unwrap().variable;
+
+        let ast = parse("sum(v)").unwrap();
+        let resolved = resolve_expr(&registry, &ast).unwrap();
+
+        assert_eq!(
+            resolved.expression,
+            Expression::sum(Expression::from_variable(variable))
+        );
+        assert_eq!(resolved.dependencies, vec!["v".to_string()]);
+    }
+
+    #[test]
+    fn resolves_index_call_with_three_arguments_to_the_same_expression_as_the_functional_builder() {
+        let registry = Registry::new();
+        registry
+            .insert_variable(Some("v".to_string()), (3, 1))
+            .unwrap();
+        let variable = registry.get_variable_by_name("v").unwrap().variable;
+
+        let ast = parse("index(v, 2, 1)").unwrap();
+        let resolved = resolve_expr(&registry, &ast).unwrap();
+
+        assert_eq!(
+            resolved.expression,
+            Expression::index(Expression::from_variable(variable), 1, 0, 1, 1)
+        );
+        assert_eq!(resolved.dependencies, vec!["v".to_string()]);
+    }
+
+    #[test]
+    fn resolves_index_call_with_five_arguments() {
+        let registry = Registry::new();
+        registry
+            .insert_variable(Some("M".to_string()), (3, 3))
+            .unwrap();
+        let variable = registry.get_variable_by_name("M").unwrap().variable;
+
+        let ast = parse("index(M, 2, 2, 2, 2)").unwrap();
+        let resolved = resolve_expr(&registry, &ast).unwrap();
+
+        assert_eq!(
+            resolved.expression,
+            Expression::index(Expression::from_variable(variable), 1, 1, 2, 2)
+        );
+    }
+
+    #[test]
+    fn resolves_nested_sum_of_index() {
+        let registry = Registry::new();
+        registry
+            .insert_variable(Some("X".to_string()), (3, 3))
+            .unwrap();
+        let variable = registry.get_variable_by_name("X").unwrap().variable;
+
+        let ast = parse("sum(index(X, 1, 1, 2, 2))").unwrap();
+        let resolved = resolve_expr(&registry, &ast).unwrap();
+
+        assert_eq!(
+            resolved.expression,
+            Expression::sum(Expression::index(
+                Expression::from_variable(variable),
+                0,
+                0,
+                2,
+                2
+            ))
+        );
+        assert_eq!(resolved.dependencies, vec!["X".to_string()]);
+    }
+
+    #[test]
+    fn rejects_unknown_function_name() {
+        let registry = Registry::new();
+        let ast = parse("foo(x)").unwrap();
+        assert_eq!(
+            resolve_expr(&registry, &ast).unwrap_err(),
+            CvxError::InvalidExpression("unknown function 'foo'".to_string())
+        );
+    }
+
+    #[test]
+    fn rejects_sum_with_wrong_arity() {
+        let registry = Registry::new();
+        registry
+            .insert_variable(Some("v".to_string()), (1, 1))
+            .unwrap();
+        let ast = parse("sum(v, v)").unwrap();
+        assert_eq!(
+            resolve_expr(&registry, &ast).unwrap_err(),
+            CvxError::InvalidExpression("sum() takes exactly 1 argument, got 2".to_string())
+        );
+    }
+
+    #[test]
+    fn rejects_index_with_wrong_arity() {
+        let registry = Registry::new();
+        registry
+            .insert_variable(Some("v".to_string()), (1, 1))
+            .unwrap();
+        let ast = parse("index(v, 1, 1, 1)").unwrap();
+        assert_eq!(
+            resolve_expr(&registry, &ast).unwrap_err(),
+            CvxError::InvalidExpression(
+                "index() takes exactly 3 or 5 arguments, got 4".to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn rejects_index_with_non_literal_row_argument() {
+        let registry = Registry::new();
+        registry
+            .insert_variable(Some("v".to_string()), (1, 1))
+            .unwrap();
+        let ast = parse("index(v, 1 + 1, 1)").unwrap();
+        assert_eq!(
+            resolve_expr(&registry, &ast).unwrap_err(),
+            CvxError::InvalidExpression(
+                "index() row/col/rows/cols arguments must be numeric literals".to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn rejects_index_with_non_positive_integer_row_argument() {
+        let registry = Registry::new();
+        registry
+            .insert_variable(Some("v".to_string()), (1, 1))
+            .unwrap();
+        let ast = parse("index(v, 0, 1)").unwrap();
+        assert_eq!(
+            resolve_expr(&registry, &ast).unwrap_err(),
+            CvxError::InvalidExpression(
+                "index() row/col/rows/cols arguments must be positive integers".to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn rejects_out_of_bounds_index_call() {
+        let registry = Registry::new();
+        registry
+            .insert_variable(Some("v".to_string()), (2, 2))
+            .unwrap();
+        let ast = parse("index(v, 2, 2, 2, 2)").unwrap();
+        assert_eq!(
+            resolve_expr(&registry, &ast).unwrap_err(),
+            CvxError::InvalidExpression(
+                "requested rows 2..3 and columns 2..3 are out of bounds for a 2x2 operand"
+                    .to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn rejects_unresolvable_identifier_nested_inside_a_call() {
+        let registry = Registry::new();
+        let ast = parse("sum(missing_name)").unwrap();
+        assert_eq!(
+            resolve_expr(&registry, &ast).unwrap_err(),
+            CvxError::UnknownIdentifier("missing_name".to_string())
         );
     }
 }

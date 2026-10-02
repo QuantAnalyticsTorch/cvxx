@@ -7,11 +7,15 @@
 //! add_sub  := mul_div (('+' | '-') mul_div)*
 //! mul_div  := unary (('*' | '/') unary)*
 //! unary    := '-' unary | primary
-//! primary  := number | identifier | '(' expr ')'
+//! primary  := number | call | identifier | '(' expr ')'
+//! call     := identifier '(' (expr (',' expr)*)? ')'
 //! number   := decimal integer or float, optional leading '-'
 //! identifier := sequence of letters, digits, underscores, or dots; must not
 //!               start with a digit or dot
 //! ```
+//!
+//! `call` is a generic function-call-syntax node (`Expr::Call`); only the
+//! `sum`/`index` names are recognized at resolve time (SPEC-0015).
 
 use crate::analytics::ast::{Constraint, Expr, ExprNode, Relation};
 use crate::core::error::CvxError;
@@ -49,6 +53,7 @@ enum Token {
     Slash,
     LParen,
     RParen,
+    Comma,
     Le,
     Ge,
     EqEq,
@@ -90,6 +95,10 @@ fn tokenize(input: &str) -> Result<Vec<Token>, CvxError> {
             }
             ')' => {
                 tokens.push(Token::RParen);
+                i += 1;
+            }
+            ',' => {
+                tokens.push(Token::Comma);
                 i += 1;
             }
             '<' if chars.get(i + 1) == Some(&'=') => {
@@ -260,7 +269,16 @@ impl<'a> Parser<'a> {
     fn parse_primary(&mut self) -> Result<ExprNode, CvxError> {
         match self.advance() {
             Some(Token::Number(value)) => Ok(Expr::Constant(*value).node()),
-            Some(Token::Identifier(name)) => Ok(Expr::Identifier(name.clone()).node()),
+            Some(Token::Identifier(name)) => {
+                let name = name.clone();
+                if matches!(self.peek(), Some(Token::LParen)) {
+                    self.advance();
+                    let args = self.parse_call_args()?;
+                    Ok(Expr::Call { name, args }.node())
+                } else {
+                    Ok(Expr::Identifier(name).node())
+                }
+            }
             Some(Token::LParen) => {
                 let inner = self.parse_expr()?;
                 self.expect(Token::RParen)?;
@@ -270,6 +288,29 @@ impl<'a> Parser<'a> {
                 "expected number, identifier, or '('".to_string(),
             )),
         }
+    }
+
+    /// Parses the comma-separated argument list of a function call, after
+    /// the opening `(` has already been consumed (SPEC-0015).
+    fn parse_call_args(&mut self) -> Result<Vec<ExprNode>, CvxError> {
+        let mut args = Vec::new();
+        if matches!(self.peek(), Some(Token::RParen)) {
+            self.advance();
+            return Ok(args);
+        }
+        loop {
+            args.push(self.parse_expr()?);
+            match self.advance() {
+                Some(Token::Comma) => continue,
+                Some(Token::RParen) => break,
+                _ => {
+                    return Err(CvxError::InvalidExpression(
+                        "expected ',' or ')' in function call arguments".to_string(),
+                    ))
+                }
+            }
+        }
+        Ok(args)
     }
 }
 
@@ -400,5 +441,126 @@ mod tests {
         assert!(parse_constraint("x < y").is_err());
         assert!(parse_constraint("x > y").is_err());
         assert!(parse_constraint("x = y").is_err());
+    }
+
+    // --- function-call syntax tests (SPEC-0015) ---
+
+    #[test]
+    fn parses_sum_call_with_one_argument() {
+        let expr = parse("sum(v)").unwrap();
+        assert_eq!(
+            expr,
+            Expr::Call {
+                name: "sum".to_string(),
+                args: vec![ident("v")],
+            }
+            .node()
+        );
+    }
+
+    #[test]
+    fn parses_index_call_with_three_arguments() {
+        let expr = parse("index(v, 2, 1)").unwrap();
+        assert_eq!(
+            expr,
+            Expr::Call {
+                name: "index".to_string(),
+                args: vec![ident("v"), constant(2.0), constant(1.0)],
+            }
+            .node()
+        );
+    }
+
+    #[test]
+    fn parses_index_call_with_five_arguments() {
+        let expr = parse("index(v, 1, 1, 2, 3)").unwrap();
+        assert_eq!(
+            expr,
+            Expr::Call {
+                name: "index".to_string(),
+                args: vec![
+                    ident("v"),
+                    constant(1.0),
+                    constant(1.0),
+                    constant(2.0),
+                    constant(3.0),
+                ],
+            }
+            .node()
+        );
+    }
+
+    #[test]
+    fn bare_identifier_not_followed_by_paren_still_parses_as_identifier() {
+        let expr = parse("sum").unwrap();
+        assert_eq!(expr, ident("sum"));
+    }
+
+    #[test]
+    fn parses_nested_function_calls() {
+        let expr = parse("sum(index(X, 1, 1, 2, 2))").unwrap();
+        assert_eq!(
+            expr,
+            Expr::Call {
+                name: "sum".to_string(),
+                args: vec![Expr::Call {
+                    name: "index".to_string(),
+                    args: vec![
+                        ident("X"),
+                        constant(1.0),
+                        constant(1.0),
+                        constant(2.0),
+                        constant(2.0),
+                    ],
+                }
+                .node()],
+            }
+            .node()
+        );
+    }
+
+    #[test]
+    fn parses_function_call_inside_a_larger_expression() {
+        let expr = parse("sum(v) + 3").unwrap();
+        assert_eq!(
+            expr,
+            Expr::Add(
+                Expr::Call {
+                    name: "sum".to_string(),
+                    args: vec![ident("v")],
+                }
+                .node(),
+                constant(3.0),
+            )
+            .node()
+        );
+    }
+
+    #[test]
+    fn parses_call_with_zero_arguments() {
+        let expr = parse("sum()").unwrap();
+        assert_eq!(
+            expr,
+            Expr::Call {
+                name: "sum".to_string(),
+                args: vec![],
+            }
+            .node()
+        );
+    }
+
+    #[test]
+    fn rejects_call_with_trailing_comma() {
+        assert!(parse("sum(v,)").is_err());
+    }
+
+    #[test]
+    fn rejects_call_with_missing_closing_paren() {
+        assert!(parse("sum(v").is_err());
+    }
+
+    #[test]
+    fn rejects_call_with_missing_comma() {
+        assert!(parse("index(v 1 1)").is_err());
     }
 }

@@ -19,6 +19,14 @@ pub enum Expr {
     Div(ExprNode, ExprNode),
     /// Unary negation.
     Neg(ExprNode),
+    /// A function-call-syntax node, e.g. `sum(v)` or `index(v, 2, 1)`
+    /// (SPEC-0015). Only `name == "sum"` (exactly 1 argument) and
+    /// `name == "index"` (exactly 3 or 5 arguments) are recognized by
+    /// `resolve`; any other `name`, or a recognized `name` with the wrong
+    /// argument count, is a resolve-time error — the parser itself does
+    /// not validate arity, staying as generic/simple as the rest of this
+    /// module.
+    Call { name: String, args: Vec<ExprNode> },
 }
 
 /// A shared AST node. `Arc` makes the tree cheap to clone during parsing and

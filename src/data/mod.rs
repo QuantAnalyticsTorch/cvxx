@@ -40,6 +40,18 @@ pub fn parse_dimension(value: &Variant) -> Result<usize, CvxError> {
     Ok(n as usize)
 }
 
+/// Parses an optional positive-integer dimension argument (`CVX.INDEX`'s
+/// `rows`/`cols`, SPEC-0015). Returns `default` when the argument is
+/// missing/blank; otherwise applies the same validation as
+/// `parse_dimension` (non-numeric, non-integer, zero, negative, or over
+/// `MAX_DIMENSION` all reject).
+pub fn parse_optional_dimension(value: &Variant, default: usize) -> Result<usize, CvxError> {
+    if is_blank(value) {
+        return Ok(default);
+    }
+    parse_dimension(value)
+}
+
 /// Parses an Excel scalar into a numeric constant.
 pub fn parse_scalar(value: &Variant) -> Result<f64, CvxError> {
     coerce_to_f64(value)
@@ -278,6 +290,27 @@ mod tests {
             parse_dimension(&Variant::from_float((MAX_DIMENSION + 1) as f64)).unwrap_err(),
             CvxError::InvalidDimension(_)
         ));
+    }
+
+    #[test]
+    fn parses_optional_dimension_present_value() {
+        assert_eq!(
+            parse_optional_dimension(&Variant::from_float(4.0), 1).unwrap(),
+            4
+        );
+    }
+
+    #[test]
+    fn parses_optional_dimension_missing_returns_default() {
+        assert_eq!(parse_optional_dimension(&Variant::missing(), 7).unwrap(), 7);
+    }
+
+    #[test]
+    fn rejects_invalid_optional_dimension_same_as_required() {
+        assert_eq!(
+            parse_optional_dimension(&Variant::from_float(0.0), 1).unwrap_err(),
+            CvxError::InvalidDimension("dimension must be a positive integer".to_string())
+        );
     }
 
     #[test]

@@ -443,3 +443,133 @@ fn sum_of_scalar_quadratic_is_rejected() {
     let err = reduce_expression(&expr, &offsets, n_total).unwrap_err();
     assert_eq!(err, VECTOR_MUL_ERROR);
 }
+
+// --- Index tests (SPEC-0015) ---
+
+#[test]
+fn index_single_entry_of_a_vector_selects_its_one_hot_row() {
+    let w = Variable::new(1, (3, 1));
+    let (offsets, n_total) = offsets_of(&[w]);
+    let expr = Expression::index(Expression::from_variable(w), 1, 0, 1, 1);
+    let form = reduce_expression(&expr, &offsets, n_total).unwrap();
+    assert_eq!(form.shape, (1, 1));
+    assert_eq!(form.entries[0].linear, vec![0.0, 1.0, 0.0]);
+}
+
+#[test]
+fn index_single_row_of_a_matrix_selects_the_expected_entries() {
+    // 2x3 matrix, row-major entries 0..=5. Row 1 (0-based) is [3, 4, 5].
+    let w = Variable::new(1, (2, 3));
+    let (offsets, n_total) = offsets_of(&[w]);
+    let expr = Expression::index(Expression::from_variable(w), 1, 0, 1, 3);
+    let form = reduce_expression(&expr, &offsets, n_total).unwrap();
+    assert_eq!(form.shape, (1, 3));
+    assert_eq!(form.entries[0].linear, vec![0.0, 0.0, 0.0, 1.0, 0.0, 0.0]);
+    assert_eq!(form.entries[1].linear, vec![0.0, 0.0, 0.0, 0.0, 1.0, 0.0]);
+    assert_eq!(form.entries[2].linear, vec![0.0, 0.0, 0.0, 0.0, 0.0, 1.0]);
+}
+
+#[test]
+fn index_single_column_of_a_matrix_selects_the_expected_entries() {
+    // 2x3 matrix; column 2 (0-based) is entries 2 and 5.
+    let w = Variable::new(1, (2, 3));
+    let (offsets, n_total) = offsets_of(&[w]);
+    let expr = Expression::index(Expression::from_variable(w), 0, 2, 2, 1);
+    let form = reduce_expression(&expr, &offsets, n_total).unwrap();
+    assert_eq!(form.shape, (2, 1));
+    assert_eq!(form.entries[0].linear, vec![0.0, 0.0, 1.0, 0.0, 0.0, 0.0]);
+    assert_eq!(form.entries[1].linear, vec![0.0, 0.0, 0.0, 0.0, 0.0, 1.0]);
+}
+
+#[test]
+fn index_general_sub_block_of_a_matrix_selects_the_expected_entries() {
+    // 3x3 matrix; rows 1..=2, cols 1..=2 (0-based) is the bottom-right 2x2.
+    let w = Variable::new(1, (3, 3));
+    let (offsets, n_total) = offsets_of(&[w]);
+    let expr = Expression::index(Expression::from_variable(w), 1, 1, 2, 2);
+    let form = reduce_expression(&expr, &offsets, n_total).unwrap();
+    assert_eq!(form.shape, (2, 2));
+    let mut zeros = vec![0.0; 9];
+    zeros[4] = 1.0;
+    assert_eq!(form.entries[0].linear, zeros);
+}
+
+#[test]
+fn index_of_a_parameter_selects_its_data() {
+    let param = Expression::from_parameter(1, (3, 1), vec![10.0, 20.0, 30.0]);
+    let expr = Expression::index(param, 1, 0, 1, 1);
+    let form = reduce_expression(&expr, &HashMap::new(), 0).unwrap();
+    assert_eq!(form.shape, (1, 1));
+    assert_eq!(form.entries[0].constant, 20.0);
+}
+
+#[test]
+fn index_nested_inside_index_reduces_correctly() {
+    let w = Variable::new(1, (3, 1));
+    let (offsets, n_total) = offsets_of(&[w]);
+    // First select the last two entries, then the first of those.
+    let inner = Expression::index(Expression::from_variable(w), 1, 0, 2, 1);
+    let expr = Expression::index(inner, 0, 0, 1, 1);
+    let form = reduce_expression(&expr, &offsets, n_total).unwrap();
+    assert_eq!(form.shape, (1, 1));
+    assert_eq!(form.entries[0].linear, vec![0.0, 1.0, 0.0]);
+}
+
+#[test]
+fn index_constraint_restricts_only_the_selected_entry() {
+    let w = Variable::new(1, (3, 1));
+    let (offsets, n_total) = offsets_of(&[w]);
+    let expr = Expression::index(Expression::from_variable(w), 1, 0, 1, 1);
+    let form = reduce_expression(&expr, &offsets, n_total).unwrap();
+    // Only the second entry's coefficient is set; the rest are untouched.
+    assert_eq!(form.entries[0].linear, vec![0.0, 1.0, 0.0]);
+    assert_eq!(form.entries[0].constant, 0.0);
+}
+
+#[test]
+fn index_out_of_bounds_is_a_descriptive_error_not_a_panic() {
+    let w = Variable::new(1, (2, 2));
+    let (offsets, n_total) = offsets_of(&[w]);
+    let expr = Expression::index(Expression::from_variable(w), 1, 1, 2, 2);
+    let err = reduce_expression(&expr, &offsets, n_total).unwrap_err();
+    assert_eq!(
+        err,
+        "requested rows 2..3 and columns 2..3 are out of bounds for a 2x2 operand"
+    );
+}
+
+#[test]
+fn is_all_scalar_false_for_any_expression_containing_index() {
+    let x = scalar_var(1);
+    let expr = Expression::index(Expression::from_variable(x), 0, 0, 1, 1);
+    assert!(!is_all_scalar(&expr));
+}
+
+#[test]
+fn index_of_scalar_quadratic_is_rejected() {
+    // Index(x * x, 0, 0, 1, 1): an all-(1,1)-leaf tree containing Index is
+    // still routed through linearize_shaped (is_all_scalar's Index arm),
+    // so the nested quadratic product is rejected, same as Sum.
+    let x = scalar_var(1);
+    let (offsets, n_total) = offsets_of(&[x]);
+    let x_expr = Expression::from_variable(x);
+    let expr = Expression::index(Expression::mul(x_expr.clone(), x_expr), 0, 0, 1, 1);
+    let err = reduce_expression(&expr, &offsets, n_total).unwrap_err();
+    assert_eq!(err, VECTOR_MUL_ERROR);
+}
+
+#[test]
+fn mul_of_two_index_derived_scalars_is_rejected() {
+    // CVX.INDEX(X, 1, 1) * CVX.INDEX(X, 1, 2): two non-constant Index
+    // operands multiplied together, forced through linearize_shaped,
+    // fails with the existing VECTOR_MUL_ERROR (no new quadratic support
+    // over Index is introduced).
+    let x = Variable::new(1, (1, 2));
+    let (offsets, n_total) = offsets_of(&[x]);
+    let x_expr = Expression::from_variable(x);
+    let left = Expression::index(x_expr.clone(), 0, 0, 1, 1);
+    let right = Expression::index(x_expr, 0, 1, 1, 1);
+    let expr = Expression::mul(left, right);
+    let err = reduce_expression(&expr, &offsets, n_total).unwrap_err();
+    assert_eq!(err, VECTOR_MUL_ERROR);
+}

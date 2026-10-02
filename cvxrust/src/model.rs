@@ -50,6 +50,19 @@ pub enum Expression {
     /// The sum of every entry of a (possibly vector/matrix-shaped)
     /// expression, reduced to a `(1, 1)` value (SPEC-0014).
     Sum(Box<Expression>),
+    /// A contiguous, rectangular, row-major sub-block of a (possibly
+    /// vector/matrix-shaped) expression: `rows` rows starting at
+    /// `row_start`, `cols` columns starting at `col_start`, all 0-based
+    /// (SPEC-0015). Covers a single entry (`rows == cols == 1`), a single
+    /// row (`rows == 1`) or column (`cols == 1`), or any other rectangular
+    /// sub-section.
+    Index {
+        expr: Box<Expression>,
+        row_start: usize,
+        col_start: usize,
+        rows: usize,
+        cols: usize,
+    },
 }
 
 impl Expression {
@@ -111,6 +124,29 @@ impl Expression {
     /// (SPEC-0014).
     pub fn sum(expr: Expression) -> Self {
         Expression::Sum(Box::new(expr))
+    }
+
+    /// Creates a sub-block index expression. `rows`/`cols` are always
+    /// `>= 1` for any `Index` built through `CVX.INDEX` (enforced at the
+    /// `cvxx` boundary by reusing `data::parse_dimension`/
+    /// `parse_optional_dimension`); this constructor does not itself
+    /// re-validate positivity or bounds, consistent with how
+    /// `Variable::new`/`Expression::from_parameter` never re-validate
+    /// `shape` either (SPEC-0015).
+    pub fn index(
+        expr: Expression,
+        row_start: usize,
+        col_start: usize,
+        rows: usize,
+        cols: usize,
+    ) -> Self {
+        Expression::Index {
+            expr: Box::new(expr),
+            row_start,
+            col_start,
+            rows,
+            cols,
+        }
     }
 }
 

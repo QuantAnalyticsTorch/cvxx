@@ -692,3 +692,74 @@ fn single_oversized_vector_variable_is_a_size_error() {
         )
     );
 }
+
+#[test]
+fn index_constraint_restricts_only_the_indexed_entry_of_a_larger_variable() {
+    // minimize sum(w) subject to w >= [0, 0, 0] and w[2] == 5 (0-based):
+    // only the third entry is pinned; the other two are driven to their
+    // own lower bound (0) by the objective, confirming Index restricts
+    // only the entry/entries it selects (SPEC-0015).
+    let w = Variable::new(1, (3, 1));
+    let w_expr = Expression::from_variable(w);
+    let zero = Expression::from_parameter(2, (3, 1), vec![0.0, 0.0, 0.0]);
+    let problem = Problem {
+        sense: Sense::Minimize,
+        objective: Expression::sum(w_expr.clone()),
+        constraints: vec![
+            Constraint {
+                relation: Relation::GreaterEqual,
+                lhs: w_expr.clone(),
+                rhs: zero,
+            },
+            Constraint {
+                relation: Relation::Equal,
+                lhs: Expression::index(w_expr, 2, 0, 1, 1),
+                rhs: Expression::constant(5.0),
+            },
+        ],
+        variables: vec![w],
+    };
+    let solution = solve(&problem);
+    assert_eq!(solution.status, SolveStatus::Optimal);
+    assert!((solution.objective_value.unwrap() - 5.0).abs() < 1e-4);
+    let values = &solution.variable_values[0];
+    assert!((values[0] - 0.0).abs() < 1e-4);
+    assert!((values[1] - 0.0).abs() < 1e-4);
+    assert!((values[2] - 5.0).abs() < 1e-4);
+}
+
+#[test]
+fn index_constraint_restricts_only_a_sub_block_of_a_matrix_variable() {
+    // minimize sum(M) subject to M >= 0 (elementwise) and the bottom-right
+    // 1x2 row of a 2x2 matrix M equal to [3, 4]; the top row is free and
+    // driven to 0 by the objective.
+    let m = Variable::new(1, (2, 2));
+    let m_expr = Expression::from_variable(m);
+    let zero = Expression::from_parameter(2, (2, 2), vec![0.0, 0.0, 0.0, 0.0]);
+    let bound = Expression::from_parameter(3, (1, 2), vec![3.0, 4.0]);
+    let problem = Problem {
+        sense: Sense::Minimize,
+        objective: Expression::sum(m_expr.clone()),
+        constraints: vec![
+            Constraint {
+                relation: Relation::GreaterEqual,
+                lhs: m_expr.clone(),
+                rhs: zero,
+            },
+            Constraint {
+                relation: Relation::Equal,
+                lhs: Expression::index(m_expr, 1, 0, 1, 2),
+                rhs: bound,
+            },
+        ],
+        variables: vec![m],
+    };
+    let solution = solve(&problem);
+    assert_eq!(solution.status, SolveStatus::Optimal);
+    assert!((solution.objective_value.unwrap() - 7.0).abs() < 1e-4);
+    let values = &solution.variable_values[0];
+    assert!((values[0] - 0.0).abs() < 1e-4);
+    assert!((values[1] - 0.0).abs() < 1e-4);
+    assert!((values[2] - 3.0).abs() < 1e-4);
+    assert!((values[3] - 4.0).abs() < 1e-4);
+}

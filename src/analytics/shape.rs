@@ -21,6 +21,17 @@ pub fn infer_shape(expr: &Expression) -> Result<(usize, usize), CvxError> {
         Expression::Neg(e) => infer_shape(e),
         Expression::Scale { expr, .. } => infer_shape(expr),
         Expression::Sum(_) => Ok((1, 1)),
+        Expression::Index {
+            expr,
+            row_start,
+            col_start,
+            rows,
+            cols,
+        } => {
+            let operand_shape = infer_shape(expr)?;
+            check_index_bounds(operand_shape, row_start + 1, col_start + 1, *rows, *cols)?;
+            Ok((*rows, *cols))
+        }
     }
 }
 
@@ -36,6 +47,30 @@ fn broadcast_shape(a: (usize, usize), b: (usize, usize)) -> Result<(usize, usize
             a.0, a.1, b.0, b.1
         )))
     }
+}
+
+/// Validates that a `rows x cols` sub-block starting at 1-based
+/// `(row, col)` fits within `operand_shape`. Shared by `CVX.INDEX`
+/// (`src/excel/expression.rs`) and the `index(...)` grammar keyword
+/// (`src/analytics/resolve.rs`) so both report the identical error
+/// message for the identical mistake (SPEC-0015).
+pub fn check_index_bounds(
+    operand_shape: (usize, usize),
+    row: usize,
+    col: usize,
+    rows: usize,
+    cols: usize,
+) -> Result<(), CvxError> {
+    let (op_rows, op_cols) = operand_shape;
+    let row_end = row + rows - 1;
+    let col_end = col + cols - 1;
+    if row_end > op_rows || col_end > op_cols {
+        return Err(CvxError::InvalidExpression(format!(
+            "requested rows {row}..{row_end} and columns {col}..{col_end} are \
+             out of bounds for a {op_rows}x{op_cols} operand"
+        )));
+    }
+    Ok(())
 }
 
 /// Renders an `Expression` as a fully-parenthesized diagnostic string for
@@ -81,6 +116,26 @@ pub fn render_expression(expr: &Expression, registry: &Registry) -> String {
             format!("{scalar} * ({})", render_expression(expr, registry))
         }
         Expression::Sum(e) => format!("sum({})", render_expression(e, registry)),
+        Expression::Index {
+            expr,
+            row_start,
+            col_start,
+            rows,
+            cols,
+        } => {
+            let inner = render_expression(expr, registry);
+            let row_part = if *rows == 1 {
+                format!("{}", row_start + 1)
+            } else {
+                format!("{}:{}", row_start + 1, row_start + rows)
+            };
+            let col_part = if *cols == 1 {
+                format!("{}", col_start + 1)
+            } else {
+                format!("{}:{}", col_start + 1, col_start + cols)
+            };
+            format!("{inner}[{row_part}, {col_part}]")
+        }
     }
 }
 
@@ -165,6 +220,67 @@ mod tests {
     }
 
     #[test]
+    fn infers_index_shape_for_single_entry_row_column_and_sub_block() {
+        let base = var(1, (3, 4));
+        assert_eq!(
+            infer_shape(&Expression::index(base.clone(), 1, 2, 1, 1)).unwrap(),
+            (1, 1)
+        );
+        assert_eq!(
+            infer_shape(&Expression::index(base.clone(), 0, 0, 1, 4)).unwrap(),
+            (1, 4)
+        );
+        assert_eq!(
+            infer_shape(&Expression::index(base.clone(), 0, 0, 3, 1)).unwrap(),
+            (3, 1)
+        );
+        assert_eq!(
+            infer_shape(&Expression::index(base, 1, 1, 2, 2)).unwrap(),
+            (2, 2)
+        );
+    }
+
+    #[test]
+    fn infer_shape_rejects_out_of_bounds_index() {
+        let base = var(1, (2, 2));
+        let err = infer_shape(&Expression::index(base, 1, 1, 2, 2)).unwrap_err();
+        assert_eq!(
+            err,
+            CvxError::InvalidExpression(
+                "requested rows 2..3 and columns 2..3 are out of bounds for a 2x2 operand"
+                    .to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn infer_shape_index_propagates_operand_shape_errors() {
+        let bad_operand = Expression::add(var(1, (2, 2)), var(2, (3, 3)));
+        let err = infer_shape(&Expression::index(bad_operand, 0, 0, 1, 1)).unwrap_err();
+        assert_eq!(
+            err,
+            CvxError::InvalidExpression("shape mismatch: 2x2 vs 3x3".to_string())
+        );
+    }
+
+    #[test]
+    fn check_index_bounds_accepts_in_bounds_selection() {
+        assert!(check_index_bounds((3, 4), 2, 3, 2, 2).is_ok());
+    }
+
+    #[test]
+    fn check_index_bounds_rejects_out_of_bounds_selection() {
+        let err = check_index_bounds((2, 2), 2, 2, 2, 2).unwrap_err();
+        assert_eq!(
+            err,
+            CvxError::InvalidExpression(
+                "requested rows 2..3 and columns 2..3 are out of bounds for a 2x2 operand"
+                    .to_string()
+            )
+        );
+    }
+
+    #[test]
     fn renders_each_node_kind() {
         let registry = Registry::new();
         assert_eq!(
@@ -193,6 +309,33 @@ mod tests {
         assert_eq!(
             render_expression(&Expression::sum(var(3, (3, 1))), &registry),
             "sum(var#3)"
+        );
+    }
+
+    #[test]
+    fn renders_single_entry_index() {
+        let registry = Registry::new();
+        assert_eq!(
+            render_expression(&Expression::index(var(3, (3, 1)), 1, 0, 1, 1), &registry),
+            "var#3[2, 1]"
+        );
+    }
+
+    #[test]
+    fn renders_row_column_and_sub_block_index() {
+        let registry = Registry::new();
+        let base = var(3, (3, 4));
+        assert_eq!(
+            render_expression(&Expression::index(base.clone(), 1, 0, 1, 4), &registry),
+            "var#3[2, 1:4]"
+        );
+        assert_eq!(
+            render_expression(&Expression::index(base.clone(), 0, 2, 3, 1), &registry),
+            "var#3[1:3, 3]"
+        );
+        assert_eq!(
+            render_expression(&Expression::index(base, 1, 1, 2, 2), &registry),
+            "var#3[2:3, 2:3]"
         );
     }
 

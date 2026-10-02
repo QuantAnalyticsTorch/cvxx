@@ -4,15 +4,16 @@
 //! Two parallel reduction paths exist, selected by [`reduce_expression`]'s
 //! routing rule (SPEC-0014):
 //!
-//! - `quadratize` â€” the original scalar-only reduction (SPEC-0010/
-//!   SPEC-0011), which supports quadratic (degree-2, "variable Ã—
+//! - `quadratize` — the original scalar-only reduction (SPEC-0010/
+//!   SPEC-0011), which supports quadratic (degree-2, "variable ×
 //!   variable") terms, but only when every `Variable`/`Parameter` leaf in
 //!   the expression has shape `(1, 1)` and the expression contains no
-//!   `Sum`.
-//! - `linearize_shaped` â€” the affine-only, shape-broadcasting reduction
+//!   `Sum`/`Index` (SPEC-0015).
+//! - `linearize_shaped` — the affine-only, shape-broadcasting reduction
 //!   (SPEC-0014) used otherwise, which supports vector/matrix-shaped
-//!   variables and parameters (and `Sum`), but rejects any product or
-//!   quotient of two variable-dependent operands.
+//!   variables and parameters (`Sum`, and `Index` sub-block selection,
+//!   SPEC-0015), but rejects any product or quotient of two
+//!   variable-dependent operands.
 //!
 //! [`crate::solver::solve`] calls only [`reduce_expression`]; it never
 //! calls `quadratize`/`linearize_shaped` directly.
@@ -138,9 +139,10 @@ fn outer_product_symmetrized(a: &[f64], b: &[f64]) -> Vec<(usize, usize, f64)> {
 }
 
 /// `true` when every `Variable`/`Parameter` leaf reachable from `expr` has
-/// shape `(1, 1)` **and** `expr` contains no `Sum` node. (`Sum` always
-/// collapses its operand to `(1, 1)`, but â€” like a non-scalar leaf â€” it
-/// forces the affine-only `linearize_shaped` path; see below.) Preserves
+/// shape `(1, 1)` **and** `expr` contains no `Sum`/`Index` node. (`Sum`
+/// always collapses its operand to `(1, 1)`, and `Index` always selects a
+/// sub-block of its operand, but — like a non-scalar leaf — each forces
+/// the affine-only `linearize_shaped` path; see below.) Preserves
 /// SPEC-0011's quadratic support exactly for any expression where this is
 /// `true`.
 fn is_all_scalar(expr: &Expression) -> bool {
@@ -176,6 +178,7 @@ fn check_expr_shapes(expr: &Expression) -> Result<(), String> {
         Expression::Neg(e) => check_expr_shapes(e),
         Expression::Scale { expr, .. } => check_expr_shapes(expr),
         Expression::Sum(_) => Err(SHAPE_ERROR.to_string()),
+        Expression::Index { .. } => Err(SHAPE_ERROR.to_string()),
     }
 }
 
@@ -358,7 +361,57 @@ fn linearize_shaped(
                 entries: vec![summed],
             })
         }
+        Expression::Index {
+            expr,
+            row_start,
+            col_start,
+            rows,
+            cols,
+        } => {
+            let inner = linearize_shaped(expr, offsets, n_total)?;
+            select_sub_block(&inner, *row_start, *col_start, *rows, *cols)
+        }
     }
+}
+
+/// Row-major sub-block selection: entries at rows
+/// `[row_start, row_start + rows)` and columns
+/// `[col_start, col_start + cols)` of `form`, into a new `ShapedForm` of
+/// shape `(rows, cols)`. Returns a descriptive `Err`, never panics, when
+/// the requested block does not fit `form.shape` — defensive only; `cvxx`
+/// already rejects this eagerly at `CVX.INDEX`/`index(...)` construction
+/// time (see `src/analytics/shape.rs::check_index_bounds`), so this is
+/// normally unreachable in practice, same reasoning as every other
+/// "defensive, not `unreachable!()`" arm in this module.
+fn select_sub_block(
+    form: &ShapedForm,
+    row_start: usize,
+    col_start: usize,
+    rows: usize,
+    cols: usize,
+) -> Result<ShapedForm, String> {
+    let (form_rows, form_cols) = form.shape;
+    if row_start + rows > form_rows || col_start + cols > form_cols {
+        return Err(format!(
+            "requested rows {}..{} and columns {}..{} are out of bounds for \
+             a {form_rows}x{form_cols} operand",
+            row_start + 1,
+            row_start + rows,
+            col_start + 1,
+            col_start + cols
+        ));
+    }
+    let mut entries = Vec::with_capacity(rows * cols);
+    for r in 0..rows {
+        for c in 0..cols {
+            let k = (row_start + r) * form_cols + (col_start + c);
+            entries.push(form.entries[k].clone());
+        }
+    }
+    Ok(ShapedForm {
+        shape: (rows, cols),
+        entries,
+    })
 }
 
 /// Reduces any (objective, or one constraint side) expression to a
@@ -467,6 +520,23 @@ fn quadratize(
             // input, consistent with the rest of this module.
             let inner = reduce_expression(e, index, n)?;
             Ok(inner
+                .entries
+                .into_iter()
+                .fold(QuadraticForm::zero(n, 0.0), |acc, x| acc.add(&x)))
+        }
+        Expression::Index {
+            expr,
+            row_start,
+            col_start,
+            rows,
+            cols,
+        } => {
+            // Unreachable in practice for the same reason as the `Sum` arm
+            // above (SPEC-0015): `is_all_scalar` returns `false` for any
+            // expression containing `Index`.
+            let inner = reduce_expression(expr, index, n)?;
+            let selected = select_sub_block(&inner, *row_start, *col_start, *rows, *cols)?;
+            Ok(selected
                 .entries
                 .into_iter()
                 .fold(QuadraticForm::zero(n, 0.0), |acc, x| acc.add(&x)))

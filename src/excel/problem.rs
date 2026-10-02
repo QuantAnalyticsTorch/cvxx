@@ -532,6 +532,110 @@ mod tests {
         assert!((result_entry.variable_values[&y_uuid][0] - 5.0).abs() < 1e-6);
     }
 
+    #[test]
+    fn grammar_sum_and_index_solve_end_to_end_with_correct_dependency_tracking() {
+        // Builds a problem entirely through CVX.EXPRESSION/CVX.CONSTRAINT
+        // grammar strings using the new sum(...)/index(...) keyword syntax
+        // (SPEC-0015), confirming: (1) they resolve/solve identically to
+        // the CVX.SUM/CVX.INDEX functional builders, and (2) unlike those
+        // functional builders, the referenced variable is swept into
+        // `problem.variables` automatically by CVX.PROBLEM's real
+        // `expand_variable_dependencies`, since resolve_expr/
+        // resolve_constraint already recorded it as a dependency.
+        let registry = Registry::global();
+        registry
+            .insert_variable(Some("grammar_sum_index_w".to_string()), (3, 1))
+            .unwrap();
+        let w_uuid = registry
+            .get_variable_by_name("grammar_sum_index_w")
+            .unwrap()
+            .uuid;
+
+        let bound_ast =
+            crate::analytics::parser::parse_constraint("grammar_sum_index_w >= 0").unwrap();
+        let bound_resolved =
+            crate::analytics::resolve::resolve_constraint(registry, &bound_ast).unwrap();
+        let bound_handle = registry
+            .insert_constraint(
+                None,
+                bound_resolved.relation,
+                bound_resolved.lhs,
+                bound_resolved.rhs,
+                bound_resolved.dependencies,
+            )
+            .unwrap();
+        let (_, bound_uuid) = parse_handle(&bound_handle).unwrap();
+
+        let pin_ast =
+            crate::analytics::parser::parse_constraint("index(grammar_sum_index_w, 2, 1) == 5")
+                .unwrap();
+        let pin_resolved =
+            crate::analytics::resolve::resolve_constraint(registry, &pin_ast).unwrap();
+        let pin_handle = registry
+            .insert_constraint(
+                None,
+                pin_resolved.relation,
+                pin_resolved.lhs,
+                pin_resolved.rhs,
+                pin_resolved.dependencies,
+            )
+            .unwrap();
+        let (_, pin_uuid) = parse_handle(&pin_handle).unwrap();
+
+        let objective_ast = crate::analytics::parser::parse("sum(grammar_sum_index_w)").unwrap();
+        let objective_resolved =
+            crate::analytics::resolve::resolve_expr(registry, &objective_ast).unwrap();
+        let objective_handle = registry
+            .insert_objective(
+                None,
+                Sense::Minimize,
+                objective_resolved.expression,
+                objective_resolved.dependencies,
+            )
+            .unwrap();
+        let (_, objective_uuid) = parse_handle(&objective_handle).unwrap();
+        let objective_entry = registry.get_objective_by_uuid(objective_uuid).unwrap();
+
+        let mut seen_vars = HashSet::new();
+        let mut seen_exprs = HashSet::new();
+        let mut variables = Vec::new();
+        expand_variable_dependencies(
+            registry,
+            &objective_entry.dependencies,
+            &mut seen_exprs,
+            &mut seen_vars,
+            &mut variables,
+        );
+        for uuid in [bound_uuid, pin_uuid] {
+            let entry = registry.get_constraint_by_uuid(uuid).unwrap();
+            expand_variable_dependencies(
+                registry,
+                &entry.dependencies,
+                &mut seen_exprs,
+                &mut seen_vars,
+                &mut variables,
+            );
+        }
+        assert_eq!(variables, vec![w_uuid]);
+
+        let problem_handle = registry
+            .insert_problem(None, objective_uuid, vec![bound_uuid, pin_uuid], variables)
+            .unwrap();
+
+        let result_handle = run_solve_for_test(&problem_handle, None).unwrap();
+        let (_, result_uuid) = parse_handle(&result_handle).unwrap();
+        let result_entry = registry.get_result_by_uuid(result_uuid).unwrap();
+
+        assert_eq!(result_entry.status, cvxrust::SolveStatus::Optimal);
+        assert!((result_entry.objective_value.unwrap() - 5.0).abs() < 1e-4);
+        let values = &result_entry.variable_values[&w_uuid];
+        // "index(grammar_sum_index_w, 2, 1)" is 1-based row 2 -> 0-based
+        // entry 1, so only the second entry is pinned to 5.
+        assert!((values[0] - 0.0).abs() < 1e-4);
+        assert!((values[1] - 5.0).abs() < 1e-4);
+        assert!((values[2] - 0.0).abs() < 1e-4);
+    }
+
     fn run_solve_for_test(problem_text: &str, name: Option<String>) -> Result<String, CvxError> {
         let registry = Registry::global();
         let problem_uuid = resolve_objective_and_problem_uuid_for_test(problem_text);

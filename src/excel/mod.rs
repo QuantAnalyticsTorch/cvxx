@@ -144,6 +144,22 @@ pub extern "system" fn xlAutoOpen() -> i32 {
     );
 
     reg.add(
+        "CVX.INDEX",
+        "QQQQQQQ$",
+        "operand, row, col, rows, cols, name",
+        "cvxx",
+        "Selects a contiguous rectangular sub-block (an entry, row, column, or sub-section) of a cvxx expression and returns the resulting handle.",
+        &[
+            "Handle of the (possibly vector/matrix-shaped) expression to select from.",
+            "1-based starting row of the selection.",
+            "1-based starting column of the selection.",
+            "Optional number of rows to select (default 1).",
+            "Optional number of columns to select (default 1).",
+            "Optional unique name for the result.",
+        ],
+    );
+
+    reg.add(
         "CVX.CONSTRAINT",
         "QQQ$",
         "constraint_string, name",

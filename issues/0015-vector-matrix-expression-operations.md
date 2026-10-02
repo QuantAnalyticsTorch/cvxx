@@ -38,6 +38,12 @@ constraint.
   expressions are already described today.
 - [ ] Existing single-number and whole-list/table expression behavior is
   unaffected.
+- [ ] Both referring to a single entry, row, column, or sub-section, and
+  combining a list/table's entries into one combined total, can be written
+  directly inside a single typed-out formula (for example, something like
+  `sum(v)`, or singling out one entry of `v` in the middle of a larger
+  formula) — not only by chaining together separate handle-producing
+  building-block steps one at a time.
 
 ## Notes
 
@@ -47,4 +53,10 @@ constraint.
 - Combining several entries into a single total (a weighted sum, or adding up
   all of a list/table's entries) is covered by ISSUE-0014, not here — that
   capability is needed to make vector/matrix variables usable at all, so it
-  was moved out of this issue and folded into ISSUE-0014's scope.
+  was moved out of this issue and folded into ISSUE-0014's scope. The one
+  exception is the last acceptance criterion above: making that
+  already-delivered combining-into-a-total capability usable directly
+  inside a single typed-out formula, alongside this issue's own
+  single-entry/sub-section capability, is in scope here, since both are the
+  same kind of "usable directly inside a formula" request and are most
+  naturally delivered together.

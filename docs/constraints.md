@@ -34,6 +34,7 @@ be nested inside parentheses or repeated.
 | `=CVX.CONSTRAINT("x + y <= 10")` | Sum of `x` and `y` is at most 10 |
 | `=CVX.CONSTRAINT("profit >= cost * 1.1", "margin")` | Named constraint |
 | `=CVX.CONSTRAINT("A == b")` | Equality constraint |
+| `=CVX.CONSTRAINT("index(x, 2, 1) <= 5")` | Only the second entry of vector `x` is at most 5 |
 
 ## Functional builders
 

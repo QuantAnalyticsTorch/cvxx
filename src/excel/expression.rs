@@ -111,6 +111,22 @@ pub extern "system" fn cvx_scale(
     to_xloper_result(result, "CVX.SCALE")
 }
 
+/// `CVX.INDEX(operand, row, col, [rows], [cols], [name])` — selects a
+/// contiguous rectangular sub-block of a (possibly vector/matrix-shaped)
+/// expression (SPEC-0015).
+#[export_name = "CVX.INDEX"]
+pub extern "system" fn cvx_index(
+    operand: LPXLOPER12,
+    row: LPXLOPER12,
+    col: LPXLOPER12,
+    rows: LPXLOPER12,
+    cols: LPXLOPER12,
+    name: LPXLOPER12,
+) -> LPXLOPER12 {
+    let result = run_index(operand, row, col, rows, cols, name);
+    to_xloper_result(result, "CVX.INDEX")
+}
+
 fn run_binary(
     left: LPXLOPER12,
     right: LPXLOPER12,
@@ -149,6 +165,28 @@ fn run_scale(
     let scalar_value = data::parse_scalar(&Variant::from_xloper(scalar))?;
     let name = data::parse_optional_name(&Variant::from_xloper(name))?;
     let expr = Expression::scale(scalar_value, operand);
+    Registry::global().insert_expression(name, expr, vec![])
+}
+
+fn run_index(
+    operand: LPXLOPER12,
+    row: LPXLOPER12,
+    col: LPXLOPER12,
+    rows: LPXLOPER12,
+    cols: LPXLOPER12,
+    name: LPXLOPER12,
+) -> Result<String, CvxError> {
+    let operand_expr = resolve_handle_arg(operand)?;
+    let row = data::parse_dimension(&Variant::from_xloper(row))?;
+    let col = data::parse_dimension(&Variant::from_xloper(col))?;
+    let rows = data::parse_optional_dimension(&Variant::from_xloper(rows), 1)?;
+    let cols = data::parse_optional_dimension(&Variant::from_xloper(cols), 1)?;
+    let name = data::parse_optional_name(&Variant::from_xloper(name))?;
+
+    let operand_shape = crate::analytics::shape::infer_shape(&operand_expr)?;
+    crate::analytics::shape::check_index_bounds(operand_shape, row, col, rows, cols)?;
+
+    let expr = Expression::index(operand_expr, row - 1, col - 1, rows, cols);
     Registry::global().insert_expression(name, expr, vec![])
 }
 
@@ -253,5 +291,155 @@ mod tests {
             | HandleKind::Prob
             | HandleKind::Result => Err(CvxError::UnknownIdentifier(handle.to_string())),
         }
+    }
+
+    // `run_index` itself takes `LPXLOPER12` and can't be driven directly in
+    // a unit test (same reason none of this module's other `run_*`
+    // functions are tested directly); this mirrors `run_index`'s body
+    // exactly, minus the `Variant`/`LPXLOPER12` parsing already covered by
+    // `data::parse_dimension`/`parse_optional_dimension`'s own tests
+    // (SPEC-0015).
+    fn run_index_for_test(
+        operand: Expression,
+        row: usize,
+        col: usize,
+        rows: usize,
+        cols: usize,
+        name: Option<String>,
+    ) -> Result<String, CvxError> {
+        let operand_shape = crate::analytics::shape::infer_shape(&operand)?;
+        crate::analytics::shape::check_index_bounds(operand_shape, row, col, rows, cols)?;
+        let expr = Expression::index(operand, row - 1, col - 1, rows, cols);
+        Registry::global().insert_expression(name, expr, vec![])
+    }
+
+    #[test]
+    fn cvx_index_selects_a_single_entry() {
+        let var_handle = Registry::global().insert_variable(None, (3, 1)).unwrap();
+        let operand = resolve_handle_for_test(&var_handle).unwrap();
+        let handle = run_index_for_test(operand.clone(), 2, 1, 1, 1, None).unwrap();
+        let (_, uuid) = parse_handle(&handle).unwrap();
+        let entry = Registry::global().get_expression_by_uuid(uuid).unwrap();
+        assert_eq!(entry.expression, Expression::index(operand, 1, 0, 1, 1));
+    }
+
+    #[test]
+    fn cvx_index_defaults_rows_and_cols_to_one() {
+        let var_handle = Registry::global().insert_variable(None, (3, 1)).unwrap();
+        let operand = resolve_handle_for_test(&var_handle).unwrap();
+        let handle = run_index_for_test(operand.clone(), 1, 1, 1, 1, None).unwrap();
+        let (_, uuid) = parse_handle(&handle).unwrap();
+        let entry = Registry::global().get_expression_by_uuid(uuid).unwrap();
+        assert_eq!(entry.expression, Expression::index(operand, 0, 0, 1, 1));
+    }
+
+    #[test]
+    fn cvx_index_selects_a_row() {
+        let var_handle = Registry::global().insert_variable(None, (2, 3)).unwrap();
+        let operand = resolve_handle_for_test(&var_handle).unwrap();
+        let handle = run_index_for_test(operand.clone(), 2, 1, 1, 3, None).unwrap();
+        let (_, uuid) = parse_handle(&handle).unwrap();
+        let entry = Registry::global().get_expression_by_uuid(uuid).unwrap();
+        assert_eq!(entry.expression, Expression::index(operand, 1, 0, 1, 3));
+    }
+
+    #[test]
+    fn cvx_index_selects_a_column() {
+        let var_handle = Registry::global().insert_variable(None, (2, 3)).unwrap();
+        let operand = resolve_handle_for_test(&var_handle).unwrap();
+        let handle = run_index_for_test(operand.clone(), 1, 2, 2, 1, None).unwrap();
+        let (_, uuid) = parse_handle(&handle).unwrap();
+        let entry = Registry::global().get_expression_by_uuid(uuid).unwrap();
+        assert_eq!(entry.expression, Expression::index(operand, 0, 1, 2, 1));
+    }
+
+    #[test]
+    fn cvx_index_selects_a_general_sub_block() {
+        let var_handle = Registry::global().insert_variable(None, (3, 3)).unwrap();
+        let operand = resolve_handle_for_test(&var_handle).unwrap();
+        let handle = run_index_for_test(operand.clone(), 2, 2, 2, 2, None).unwrap();
+        let (_, uuid) = parse_handle(&handle).unwrap();
+        let entry = Registry::global().get_expression_by_uuid(uuid).unwrap();
+        assert_eq!(entry.expression, Expression::index(operand, 1, 1, 2, 2));
+    }
+
+    #[test]
+    fn cvx_index_of_an_index_nests_correctly() {
+        let var_handle = Registry::global().insert_variable(None, (3, 1)).unwrap();
+        let operand = resolve_handle_for_test(&var_handle).unwrap();
+        let inner_handle = run_index_for_test(operand, 2, 1, 2, 1, None).unwrap();
+        let inner_expr = resolve_handle_for_test(&inner_handle).unwrap();
+        let outer_handle = run_index_for_test(inner_expr.clone(), 1, 1, 1, 1, None).unwrap();
+        let (_, uuid) = parse_handle(&outer_handle).unwrap();
+        let entry = Registry::global().get_expression_by_uuid(uuid).unwrap();
+        assert_eq!(entry.expression, Expression::index(inner_expr, 0, 0, 1, 1));
+    }
+
+    #[test]
+    fn cvx_index_out_of_bounds_is_a_descriptive_error() {
+        let var_handle = Registry::global().insert_variable(None, (2, 2)).unwrap();
+        let operand = resolve_handle_for_test(&var_handle).unwrap();
+        let err = run_index_for_test(operand, 2, 2, 2, 2, None).unwrap_err();
+        assert_eq!(
+            err,
+            CvxError::InvalidExpression(
+                "requested rows 2..3 and columns 2..3 are out of bounds for a 2x2 operand"
+                    .to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn cvx_index_reusing_a_name_overwrites_the_previous_entry() {
+        // Expressions intentionally allow same-table name reuse (unlike
+        // parameters/variables): `insert_expression` overwrites the old
+        // entry so repeated Excel edits/recalculation can keep reusing the
+        // same name (`src/core/registry.rs::insert_expression`).
+        // `CVX.INDEX` inherits this unchanged.
+        let var_handle = Registry::global().insert_variable(None, (2, 1)).unwrap();
+        let operand = resolve_handle_for_test(&var_handle).unwrap();
+        run_index_for_test(
+            operand.clone(),
+            1,
+            1,
+            1,
+            1,
+            Some("reused_index_name".to_string()),
+        )
+        .unwrap();
+        run_index_for_test(
+            operand.clone(),
+            2,
+            1,
+            1,
+            1,
+            Some("reused_index_name".to_string()),
+        )
+        .unwrap();
+        let entry = Registry::global()
+            .get_expression_by_name("reused_index_name")
+            .unwrap();
+        assert_eq!(entry.expression, Expression::index(operand, 1, 0, 1, 1));
+    }
+
+    #[test]
+    fn cvx_index_name_already_used_by_a_different_object_table_errors() {
+        let var_handle = Registry::global()
+            .insert_variable(
+                Some("index_name_ambiguous_with_variable".to_string()),
+                (2, 1),
+            )
+            .unwrap();
+        let operand = resolve_handle_for_test(&var_handle).unwrap();
+        let err = run_index_for_test(
+            operand,
+            1,
+            1,
+            1,
+            1,
+            Some("index_name_ambiguous_with_variable".to_string()),
+        )
+        .unwrap_err();
+        assert!(matches!(err, CvxError::AmbiguousIdentifier(_)));
     }
 }
