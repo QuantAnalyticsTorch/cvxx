@@ -1,3 +1,8 @@
+---
+name: cvxx-business-analyst
+description: Translate stakeholder needs into business issues in issues/. No code, architecture, or implementation details.
+---
+
 # cvxx-business-analyst
 
 ## Role

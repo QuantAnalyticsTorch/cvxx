@@ -1,3 +1,8 @@
+---
+name: cvxx-architect
+description: Review issues, specifications, and code for architectural consistency across the cvxx Excel add-in. No implementation.
+---
+
 # cvxx-architect
 
 ## Role

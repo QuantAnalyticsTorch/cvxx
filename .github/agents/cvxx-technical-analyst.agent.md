@@ -1,3 +1,8 @@
+---
+name: cvxx-technical-analyst
+description: Turn a business issue from issues/ into one or more technical specifications in specifications/. No implementation code.
+---
+
 # cvxx-technical-analyst
 
 ## Role

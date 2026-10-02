@@ -1,3 +1,8 @@
+---
+name: cvxx-developer
+description: Implement technical specifications as Rust code, tests, examples, and documentation for the cvxx Excel add-in.
+---
+
 # cvxx-developer
 
 ## Role
