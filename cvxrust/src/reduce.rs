@@ -1,23 +1,20 @@
-﻿//! Reduces (possibly vector/matrix-shaped) [`Expression`] trees into
+//! Reduces (possibly vector/matrix-shaped) [`Expression`] trees into
 //! numeric linear/quadratic forms ready for conic-program assembly.
 //!
-//! Two parallel reduction paths exist, selected by [`reduce_expression`]'s
-//! routing rule (SPEC-0014):
+//! A single reduction function, `linearize_shaped`, handles every shape
+//! uniformly (SPEC-0016): a scalar `(1, 1)` expression is simply the
+//! `(1, 1)` special case of the same shape-broadcasting machinery used for
+//! vector/matrix expressions. It supports vector/matrix-shaped variables
+//! and parameters (`Sum`, `Index` sub-block selection, `MatMul`/
+//! `Transpose`, SPEC-0014/SPEC-0015/SPEC-0018), and reduces a product or
+//! matrix-product of two variable-dependent operands to a genuine
+//! quadratic (degree-2) term via the shared `multiply_forms` helper,
+//! rejecting only genuine degree-3-or-higher products (SPEC-0011/
+//! SPEC-0016).
 //!
-//! - `quadratize` — the original scalar-only reduction (SPEC-0010/
-//!   SPEC-0011), which supports quadratic (degree-2, "variable ×
-//!   variable") terms, but only when every `Variable`/`Parameter` leaf in
-//!   the expression has shape `(1, 1)` and the expression contains no
-//!   `Sum`/`Index`/`MatMul` (SPEC-0015/SPEC-0018; a bare `Transpose` does
-//!   not by itself force the other path — see `check_expr_shapes`).
-//! - `linearize_shaped` — the affine-only, shape-broadcasting reduction
-//!   (SPEC-0014) used otherwise, which supports vector/matrix-shaped
-//!   variables and parameters (`Sum`, `Index` sub-block selection, and
-//!   `MatMul`/`Transpose`, SPEC-0015/SPEC-0018), but rejects any product
-//!   or quotient of two variable-dependent operands.
-//!
-//! [`crate::solver::solve`] calls only [`reduce_expression`]; it never
-//! calls `quadratize`/`linearize_shaped` directly.
+//! [`crate::solver::solve`] calls only [`reduce_expression`] (a thin
+//! wrapper around `linearize_shaped`); it never calls `linearize_shaped`
+//! directly.
 
 use std::collections::HashMap;
 
@@ -139,57 +136,12 @@ fn outer_product_symmetrized(a: &[f64], b: &[f64]) -> Vec<(usize, usize, f64)> {
     result
 }
 
-/// `true` when every `Variable`/`Parameter` leaf reachable from `expr` has
-/// shape `(1, 1)` **and** `expr` contains no `Sum`/`Index` node. (`Sum`
-/// always collapses its operand to `(1, 1)`, and `Index` always selects a
-/// sub-block of its operand, but — like a non-scalar leaf — each forces
-/// the affine-only `linearize_shaped` path; see below.) Preserves
-/// SPEC-0011's quadratic support exactly for any expression where this is
-/// `true`.
-fn is_all_scalar(expr: &Expression) -> bool {
-    check_expr_shapes(expr).is_ok()
-}
-
-fn check_expr_shapes(expr: &Expression) -> Result<(), String> {
-    const SHAPE_ERROR: &str = "solver only supports scalar (1x1) variables and parameters";
-
-    match expr {
-        Expression::Constant(_) => Ok(()),
-        Expression::Parameter { shape, .. } => {
-            if *shape != (1, 1) {
-                Err(SHAPE_ERROR.to_string())
-            } else {
-                Ok(())
-            }
-        }
-        Expression::Variable(v) => {
-            if v.shape != (1, 1) {
-                Err(SHAPE_ERROR.to_string())
-            } else {
-                Ok(())
-            }
-        }
-        Expression::Add(l, r)
-        | Expression::Sub(l, r)
-        | Expression::Mul(l, r)
-        | Expression::Div(l, r) => {
-            check_expr_shapes(l)?;
-            check_expr_shapes(r)
-        }
-        Expression::Neg(e) => check_expr_shapes(e),
-        Expression::Scale { expr, .. } => check_expr_shapes(expr),
-        Expression::Sum(_) => Err(SHAPE_ERROR.to_string()),
-        Expression::Index { .. } => Err(SHAPE_ERROR.to_string()),
-        Expression::MatMul(..) => Err(SHAPE_ERROR.to_string()),
-        Expression::Transpose(e) => check_expr_shapes(e),
-    }
-}
-
 /// Row-major reduction of a (possibly vector/matrix-shaped) `Expression`:
 /// one `QuadraticForm` per output entry, over the problem's full
-/// `n_total`-long scalar-variable space. Every entry's `quad` is empty
-/// unless `shape == (1, 1)` (see [`reduce_expression`]'s routing rule,
-/// SPEC-0014).
+/// `n_total`-long scalar-variable space. An entry's `quad` is non-empty
+/// whenever that entry is a genuine degree-2 term — e.g. a product of two
+/// variable-dependent operands (SPEC-0016) — regardless of the
+/// expression's shape.
 #[derive(Debug)]
 pub(crate) struct ShapedForm {
     pub(crate) shape: (usize, usize),
@@ -246,21 +198,61 @@ pub(crate) fn matmul_shape(a: (usize, usize), b: (usize, usize)) -> Result<(usiz
     Ok((a.0, b.1))
 }
 
-const VECTOR_MUL_ERROR: &str = "solver only supports linear (affine) \
-objectives and constraints once a vector or matrix (non-1x1) variable or \
-parameter is involved; a product of two variable-dependent terms was found";
+/// A product of three or more variable-dependent terms (via any mix of
+/// `Mul`/`MatMul`) exceeds the solver's degree-2 (quadratic) limit.
+const DEGREE_ERROR: &str = "solver only supports linear and quadratic \
+(degree <= 2) objectives and constraints; a product of three or more \
+variable-dependent terms was found";
 
-const VECTOR_DIV_ERROR: &str = "solver only supports linear (affine) \
-objectives and constraints once a vector or matrix (non-1x1) variable or \
-parameter is involved; division by a variable-dependent term was found";
+/// Division by a non-constant (variable-dependent) term is never legal,
+/// regardless of shape or degree.
+const DIVISION_ERROR: &str = "solver only supports linear or quadratic \
+objectives and constraints; division by a variable-dependent term was found";
 
-/// Affine, shape-broadcasting reduction used whenever `is_all_scalar`
-/// is `false` for the top-level expression being reduced (SPEC-0014).
-/// Recurses into itself (not [`reduce_expression`]): once a non-`(1, 1)`
-/// leaf or a `Sum` appears anywhere in an objective or constraint side, the
-/// entire side is restricted to affine (degree <= 1) arithmetic, even for
-/// an otherwise-scalar sub-expression nested inside it. This is a
-/// deliberate scope boundary (SPEC-0014 Non-Objective), not an oversight.
+/// Reduces the product of two `QuadraticForm`s (already positioned over
+/// the same `n_total`-long scalar-variable space) to a `QuadraticForm`.
+///
+/// - If either side is a pure constant, the product is the other side
+///   scaled by that constant (degree unchanged).
+/// - Else, if both sides are affine (`quad` empty) but neither is
+///   constant, the product is a new degree-2 `QuadraticForm`.
+/// - Else (at least one side already carries a quadratic term and the
+///   other is non-constant) the product would be degree >= 3: rejected.
+///
+/// Used by both `linearize_shaped`'s `Expression::Mul` arm and
+/// `matmul_entries`'s per-term accumulation (SPEC-0016) — a scalar product
+/// is simply the `(1, 1)` special case of the same reduction a
+/// vector/matrix-shaped product uses.
+fn multiply_forms(l: QuadraticForm, r: QuadraticForm) -> Result<QuadraticForm, String> {
+    if l.is_constant() {
+        return Ok(r.scale(l.constant));
+    }
+    if r.is_constant() {
+        return Ok(l.scale(r.constant));
+    }
+    if l.is_affine() && r.is_affine() {
+        let linear: Vec<f64> = l
+            .linear
+            .iter()
+            .zip(r.linear.iter())
+            .map(|(&a, &b)| l.constant * b + r.constant * a)
+            .collect();
+        return Ok(QuadraticForm {
+            constant: l.constant * r.constant,
+            linear,
+            quad: outer_product_symmetrized(&l.linear, &r.linear),
+        });
+    }
+    Err(DEGREE_ERROR.to_string())
+}
+
+/// Shape-broadcasting reduction for every (objective, or one constraint
+/// side) expression (SPEC-0014/SPEC-0016): a scalar `(1, 1)` expression is
+/// simply the `(1, 1)` special case of the same machinery used for
+/// vector/matrix expressions. Supports quadratic (degree-2) terms, via
+/// `multiply_forms`, from a product or matrix-product of two
+/// variable-dependent operands, rejecting only genuine degree-3-or-higher
+/// products.
 fn linearize_shaped(
     expr: &Expression,
     offsets: &HashMap<u64, usize>,
@@ -325,15 +317,9 @@ fn linearize_shaped(
             let count = shape.0 * shape.1;
             let mut entries = Vec::with_capacity(count);
             for k in 0..count {
-                let l_entry = entry_at(&lf, k);
-                let r_entry = entry_at(&rf, k);
-                entries.push(if l_entry.is_constant() {
-                    r_entry.clone().scale(l_entry.constant)
-                } else if r_entry.is_constant() {
-                    l_entry.clone().scale(r_entry.constant)
-                } else {
-                    return Err(VECTOR_MUL_ERROR.to_string());
-                });
+                let l_entry = entry_at(&lf, k).clone();
+                let r_entry = entry_at(&rf, k).clone();
+                entries.push(multiply_forms(l_entry, r_entry)?);
             }
             Ok(ShapedForm { shape, entries })
         }
@@ -347,7 +333,7 @@ fn linearize_shaped(
                 let l_entry = entry_at(&lf, k);
                 let r_entry = entry_at(&rf, k);
                 if !r_entry.is_constant() {
-                    return Err(VECTOR_DIV_ERROR.to_string());
+                    return Err(DIVISION_ERROR.to_string());
                 }
                 if r_entry.constant.abs() < 1e-12 {
                     return Err("division by zero in objective or constraint".to_string());
@@ -423,10 +409,11 @@ fn transpose_entries(form: &ShapedForm) -> ShapedForm {
 
 /// Standard (2-D) matrix multiplication: entry `(i, j)` of the `m x n`
 /// result is `sum_k l[i, k] * r[k, j]` over the shared `k` dimension. Each
-/// individual product term follows the same "at most one
-/// variable-dependent side" rule as elementwise `Mul` (SPEC-0014); any term
-/// violating it fails with the existing `VECTOR_MUL_ERROR`, accumulated via
-/// repeated `QuadraticForm::add` (SPEC-0018).
+/// individual product term is reduced via `multiply_forms` (SPEC-0016), so
+/// a term with two variable-dependent sides becomes a quadratic term
+/// rather than an error, as long as it stays degree <= 2; the running
+/// per-output-entry accumulation is via repeated `QuadraticForm::add`
+/// (SPEC-0018).
 fn matmul_entries(l: &ShapedForm, r: &ShapedForm, n_total: usize) -> Result<ShapedForm, String> {
     let (m, k) = l.shape;
     let (k2, n) = r.shape;
@@ -438,15 +425,9 @@ fn matmul_entries(l: &ShapedForm, r: &ShapedForm, n_total: usize) -> Result<Shap
         for j in 0..n {
             let mut acc = QuadraticForm::zero(n_total, 0.0);
             for t in 0..k {
-                let l_entry = &l.entries[i * k + t];
-                let r_entry = &r.entries[t * n + j];
-                let term = if l_entry.is_constant() {
-                    r_entry.clone().scale(l_entry.constant)
-                } else if r_entry.is_constant() {
-                    l_entry.clone().scale(r_entry.constant)
-                } else {
-                    return Err(VECTOR_MUL_ERROR.to_string());
-                };
+                let l_entry = l.entries[i * k + t].clone();
+                let r_entry = r.entries[t * n + j].clone();
+                let term = multiply_forms(l_entry, r_entry)?;
                 acc = acc.add(&term);
             }
             entries.push(acc);
@@ -499,160 +480,14 @@ fn select_sub_block(
 }
 
 /// Reduces any (objective, or one constraint side) expression to a
-/// per-entry shaped form, routing through the quadratic-capable
-/// `quadratize` when `is_all_scalar` (preserving SPEC-0011 exactly) or the
-/// affine-only, shape-broadcasting `linearize_shaped` otherwise
-/// (SPEC-0014). The only entry point [`crate::solver::solve`] calls into
-/// this module.
+/// per-entry shaped form via the unified `linearize_shaped` (SPEC-0016).
+/// The only entry point [`crate::solver::solve`] calls into this module.
 pub(crate) fn reduce_expression(
     expr: &Expression,
     offsets: &HashMap<u64, usize>,
     n_total: usize,
 ) -> Result<ShapedForm, String> {
-    if is_all_scalar(expr) {
-        let form = quadratize(expr, offsets, n_total)?;
-        Ok(ShapedForm {
-            shape: (1, 1),
-            entries: vec![form],
-        })
-    } else {
-        linearize_shaped(expr, offsets, n_total)
-    }
-}
-
-/// Step 2 â€” reduces `expr` to a [`QuadraticForm`] over `problem.variables`
-/// (via `index`, mapping variable id to position), or returns a descriptive
-/// error for any construct of degree higher than 2 (or an illegal
-/// division).
-fn quadratize(
-    expr: &Expression,
-    index: &HashMap<u64, usize>,
-    n: usize,
-) -> Result<QuadraticForm, String> {
-    match expr {
-        Expression::Constant(c) => Ok(QuadraticForm::zero(n, *c)),
-        Expression::Parameter { data, .. } => Ok(QuadraticForm::zero(n, data[0])),
-        Expression::Variable(v) => match index.get(&v.id) {
-            Some(&i) => {
-                let mut form = QuadraticForm::zero(n, 0.0);
-                form.linear[i] = 1.0;
-                Ok(form)
-            }
-            None => Err(
-                "objective or constraint references a variable not included in the problem's variable list"
-                    .to_string(),
-            ),
-        },
-        Expression::Add(l, r) => {
-            let lf = quadratize(l, index, n)?;
-            let rf = quadratize(r, index, n)?;
-            Ok(lf.add(&rf))
-        }
-        Expression::Sub(l, r) => {
-            let lf = quadratize(l, index, n)?;
-            let rf = quadratize(r, index, n)?;
-            Ok(lf.sub(&rf))
-        }
-        Expression::Neg(e) => Ok(quadratize(e, index, n)?.negate()),
-        Expression::Scale { scalar, expr } => Ok(quadratize(expr, index, n)?.scale(*scalar)),
-        Expression::Mul(l, r) => {
-            let lf = quadratize(l, index, n)?;
-            let rf = quadratize(r, index, n)?;
-            if lf.is_constant() {
-                Ok(rf.scale(lf.constant))
-            } else if rf.is_constant() {
-                Ok(lf.scale(rf.constant))
-            } else if lf.is_affine() && rf.is_affine() {
-                let linear: Vec<f64> = (0..n)
-                    .map(|i| lf.constant * rf.linear[i] + rf.constant * lf.linear[i])
-                    .collect();
-                Ok(QuadraticForm {
-                    constant: lf.constant * rf.constant,
-                    linear,
-                    quad: outer_product_symmetrized(&lf.linear, &rf.linear),
-                })
-            } else {
-                Err(
-                    "solver only supports linear and quadratic (degree <= 2) objectives and constraints; a product of three or more variable-dependent terms was found"
-                        .to_string(),
-                )
-            }
-        }
-        Expression::Div(l, r) => {
-            let lf = quadratize(l, index, n)?;
-            let rf = quadratize(r, index, n)?;
-            if rf.is_constant() {
-                if rf.constant.abs() < 1e-12 {
-                    Err("division by zero in objective or constraint".to_string())
-                } else {
-                    Ok(lf.scale(1.0 / rf.constant))
-                }
-            } else {
-                Err(
-                    "solver only supports linear or quadratic objectives and constraints; division by a variable-dependent term was found"
-                        .to_string(),
-                )
-            }
-        }
-        Expression::Sum(e) => {
-            // By construction, `quadratize` is only ever invoked when
-            // `is_all_scalar` is `true`, and `is_all_scalar` returns `false`
-            // for any expression containing `Sum` anywhere (SPEC-0014), so
-            // this arm is unreachable in practice. It is still implemented
-            // defensively (not `unreachable!()`) to keep this match
-            // exhaustive without ever panicking on malformed-but-well-typed
-            // input, consistent with the rest of this module.
-            let inner = reduce_expression(e, index, n)?;
-            Ok(inner
-                .entries
-                .into_iter()
-                .fold(QuadraticForm::zero(n, 0.0), |acc, x| acc.add(&x)))
-        }
-        Expression::Index {
-            expr,
-            row_start,
-            col_start,
-            rows,
-            cols,
-        } => {
-            // Unreachable in practice for the same reason as the `Sum` arm
-            // above (SPEC-0015): `is_all_scalar` returns `false` for any
-            // expression containing `Index`.
-            let inner = reduce_expression(expr, index, n)?;
-            let selected = select_sub_block(&inner, *row_start, *col_start, *rows, *cols)?;
-            Ok(selected
-                .entries
-                .into_iter()
-                .fold(QuadraticForm::zero(n, 0.0), |acc, x| acc.add(&x)))
-        }
-        Expression::MatMul(l, r) => {
-            // Unreachable in practice for the same reason as `Sum`/`Index`
-            // above (SPEC-0018): `is_all_scalar` returns `false` for any
-            // expression containing `MatMul`.
-            let lf = reduce_expression(l, index, n)?;
-            let rf = reduce_expression(r, index, n)?;
-            let result = matmul_entries(&lf, &rf, n)?;
-            Ok(result
-                .entries
-                .into_iter()
-                .fold(QuadraticForm::zero(n, 0.0), |acc, x| acc.add(&x)))
-        }
-        Expression::Transpose(e) => {
-            // Unlike `Sum`/`Index`/`MatMul`, `Transpose` alone does not
-            // force `is_all_scalar` to `false` (`check_expr_shapes`
-            // recurses into its operand, SPEC-0018), so this arm *is*
-            // reachable in practice — e.g. the bare objective
-            // `Expression::transpose(Expression::constant(5.0))`. It is
-            // still a one-entry fold, since a `(1, 1)` operand transposed
-            // is itself `(1, 1)`.
-            let inner = reduce_expression(e, index, n)?;
-            let transposed = transpose_entries(&inner);
-            Ok(transposed
-                .entries
-                .into_iter()
-                .fold(QuadraticForm::zero(n, 0.0), |acc, x| acc.add(&x)))
-        }
-    }
+    linearize_shaped(expr, offsets, n_total)
 }
 
 #[cfg(test)]

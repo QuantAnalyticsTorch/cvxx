@@ -880,25 +880,122 @@ fn matmul_constraint_restricts_only_the_selected_combination_of_a_larger_variabl
 }
 
 #[test]
-fn matmul_chained_so_the_variable_appears_on_both_final_sides_is_rejected() {
-    // (w.T @ Sigma) @ w, a combined-risk-style quadratic form over a
-    // variable-dependent matrix/vector `w`: the first `MatMul` (variable
-    // @ constant) is fine, but the second multiplies the resulting
-    // variable-dependent row against `w` itself — two variable-dependent
-    // operands, out of scope for this specification (deferred to
-    // ISSUE-0016, same as a bare `Mul` of two variable-dependent terms).
+fn matmul_chained_so_the_variable_appears_on_both_final_sides_solves_a_portfolio_risk_problem() {
+    // (w.T @ Sigma) @ w, a portfolio-risk-style quadratic form over a
+    // variable-dependent vector `w`: the first `MatMul` (variable @
+    // constant) produces a variable-dependent row, and the second
+    // multiplies that row against `w` itself — two variable-dependent
+    // operands. SPEC-0018 deferred this case to ISSUE-0016; SPEC-0016
+    // resolves it, reducing it to the expected convex quadratic form
+    // instead of rejecting it.
+    //
+    // minimize w.T @ I @ w subject to sum(w) == 1 (a budget constraint)
+    // is the minimum-variance allocation for an identity covariance
+    // matrix, with the well-known closed-form optimum w = [0.5, 0.5],
+    // objective 0.5.
     let w = Variable::new(1, (2, 1));
     let w_expr = Expression::from_variable(w);
     let sigma = Expression::from_parameter(2, (2, 2), vec![1.0, 0.0, 0.0, 1.0]);
     let risk = Expression::matmul(
         Expression::matmul(Expression::transpose(w_expr.clone()), sigma),
-        w_expr,
+        w_expr.clone(),
     );
     let problem = Problem {
         sense: Sense::Minimize,
         objective: risk,
-        constraints: Vec::new(),
+        constraints: vec![Constraint {
+            relation: Relation::Equal,
+            lhs: Expression::sum(w_expr),
+            rhs: Expression::constant(1.0),
+        }],
         variables: vec![w],
+    };
+    let solution = solve(&problem);
+    assert_eq!(solution.status, SolveStatus::Optimal);
+    assert!((solution.objective_value.unwrap() - 0.5).abs() < 1e-4);
+    let values = &solution.variable_values[0];
+    assert!((values[0] - 0.5).abs() < 1e-4);
+    assert!((values[1] - 0.5).abs() < 1e-4);
+}
+
+#[test]
+fn sum_of_squares_least_squares_problem_solves_the_expected_optimum() {
+    // minimize CVX.SUM(CVX.MUL(diff, diff)) where diff = (a @ x) - b, the
+    // least-squares building block ISSUE-0016 calls out by name. For a
+    // 1-unknown, 2-observation toy problem with `a = [[1], [1]]` and
+    // `b = [1, 3]`, the (unconstrained) least-squares optimum is the mean
+    // of the observations, x = 2, with residual sum of squares 2.0.
+    let x = Variable::new(1, (1, 1));
+    let x_expr = Expression::from_variable(x);
+    let a = Expression::from_parameter(2, (2, 1), vec![1.0, 1.0]);
+    let b = Expression::from_parameter(3, (2, 1), vec![1.0, 3.0]);
+    let diff = Expression::sub(Expression::matmul(a, x_expr), b);
+    let objective = Expression::sum(Expression::mul(diff.clone(), diff));
+    let problem = Problem {
+        sense: Sense::Minimize,
+        objective,
+        constraints: Vec::new(),
+        variables: vec![x],
+    };
+    let solution = solve(&problem);
+    assert_eq!(solution.status, SolveStatus::Optimal);
+    assert!((solution.variable_values[0][0] - 2.0).abs() < 1e-4);
+    assert!((solution.objective_value.unwrap() - 2.0).abs() < 1e-4);
+}
+
+#[test]
+fn quadratic_vector_constraint_from_a_matmul_self_dot_product_restricts_a_unit_ball() {
+    // x.T @ x <= 1 for a (2, 1) variable x (a unit-ball constraint built
+    // from a genuine two-variable-dependent-operand MatMul, SPEC-0016),
+    // combined with a linear objective pushing against the boundary:
+    // minimize -(x0 + x1) subject to x.T @ x <= 1 has optimum
+    // x = [1/sqrt(2), 1/sqrt(2)], objective -sqrt(2).
+    let x = Variable::new(1, (2, 1));
+    let x_expr = Expression::from_variable(x);
+    let objective = Expression::neg(Expression::sum(x_expr.clone()));
+    let unit_ball = Expression::matmul(Expression::transpose(x_expr.clone()), x_expr);
+    let problem = Problem {
+        sense: Sense::Minimize,
+        objective,
+        constraints: vec![Constraint {
+            relation: Relation::LessEqual,
+            lhs: unit_ball,
+            rhs: Expression::constant(1.0),
+        }],
+        variables: vec![x],
+    };
+    let solution = solve(&problem);
+    assert_eq!(solution.status, SolveStatus::Optimal);
+    let expected = 1.0 / 2.0_f64.sqrt();
+    assert!((solution.variable_values[0][0] - expected).abs() < 1e-4);
+    assert!((solution.variable_values[0][1] - expected).abs() < 1e-4);
+    assert!((solution.objective_value.unwrap() - (-2.0_f64.sqrt())).abs() < 1e-4);
+}
+
+#[test]
+fn indefinite_matmul_quadratic_constraint_is_rejected_as_non_convex() {
+    // x.T @ M @ x <= 1 for an indefinite `M = [[1, 0], [0, -1]]`: the
+    // same non-convexity rejection `indefinite_quadratic_constraint_is_rejected_as_non_convex`
+    // (above) already exercises for a scalar-originated quadratic
+    // constraint, now also reached from a MatMul-originated one
+    // (SPEC-0016) via the same unchanged `build_soc_block` convexity
+    // check.
+    let x = Variable::new(1, (2, 1));
+    let x_expr = Expression::from_variable(x);
+    let m = Expression::from_parameter(2, (2, 2), vec![1.0, 0.0, 0.0, -1.0]);
+    let indefinite = Expression::matmul(
+        Expression::matmul(Expression::transpose(x_expr.clone()), m),
+        x_expr,
+    );
+    let problem = Problem {
+        sense: Sense::Minimize,
+        objective: Expression::constant(0.0),
+        constraints: vec![Constraint {
+            relation: Relation::LessEqual,
+            lhs: indefinite,
+            rhs: Expression::constant(1.0),
+        }],
+        variables: vec![x],
     };
     let solution = solve(&problem);
     match solution.status {

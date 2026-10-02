@@ -23,6 +23,27 @@ fn offsets_of(vars: &[Variable]) -> (HashMap<u64, usize>, usize) {
     (offsets, n_total)
 }
 
+/// Deterministic ordering for a sparse `quad` list, since `combine_quad`'s
+/// `HashMap`-based accumulation does not guarantee entry order.
+fn sorted_quad(mut quad: Vec<(usize, usize, f64)>) -> Vec<(usize, usize, f64)> {
+    quad.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
+    quad
+}
+
+/// Test-only wrapper preserving the pre-SPEC-0016 `quadratize(expr,
+/// offsets, n_total) -> Result<QuadraticForm, String>` signature used
+/// throughout this file's scalar-only test section, now backed by the
+/// unified `linearize_shaped` (SPEC-0016). Every expression under test
+/// here is scalar (`(1, 1)`), so this always has exactly one entry.
+fn quadratize(
+    expr: &Expression,
+    offsets: &HashMap<u64, usize>,
+    n_total: usize,
+) -> Result<QuadraticForm, String> {
+    let form = linearize_shaped(expr, offsets, n_total)?;
+    Ok(form.entries.into_iter().next().unwrap())
+}
+
 // --- quadratization tests ---
 
 #[test]
@@ -305,13 +326,21 @@ fn linearize_shaped_mul_by_constant_vector_is_affine() {
 }
 
 #[test]
-fn linearize_shaped_mul_of_two_variable_vectors_is_an_error() {
+fn linearize_shaped_mul_of_two_variable_vectors_is_quadratic() {
+    // SPEC-0016: a product of two variable-dependent vectors is no longer
+    // unconditionally rejected; each broadcast entry is its own degree-2
+    // (elementwise) quadratic term, w_k * v_k.
     let w = Variable::new(1, (3, 1));
     let v = Variable::new(2, (3, 1));
     let (offsets, n_total) = offsets_of(&[w, v]);
     let expr = Expression::mul(Expression::from_variable(w), Expression::from_variable(v));
-    let err = linearize_shaped(&expr, &offsets, n_total).unwrap_err();
-    assert_eq!(err, VECTOR_MUL_ERROR);
+    let form = linearize_shaped(&expr, &offsets, n_total).unwrap();
+    assert_eq!(form.shape, (3, 1));
+    for k in 0..3 {
+        assert_eq!(form.entries[k].quad, vec![(k, 3 + k, 1.0)]);
+        assert_eq!(form.entries[k].constant, 0.0);
+        assert!(form.entries[k].linear.iter().all(|c| *c == 0.0));
+    }
 }
 
 #[test]
@@ -331,7 +360,7 @@ fn linearize_shaped_div_by_variable_vector_is_an_error() {
     let (offsets, n_total) = offsets_of(&[w, v]);
     let expr = Expression::div(Expression::from_variable(w), Expression::from_variable(v));
     let err = linearize_shaped(&expr, &offsets, n_total).unwrap_err();
-    assert_eq!(err, VECTOR_DIV_ERROR);
+    assert_eq!(err, DIVISION_ERROR);
 }
 
 #[test]
@@ -357,31 +386,11 @@ fn linearize_shaped_neg_and_scale_preserve_shape() {
 }
 
 #[test]
-fn is_all_scalar_true_for_all_1x1_leaves_even_with_quadratic_term() {
-    let x = scalar_var(1);
-    let expr = Expression::mul(Expression::from_variable(x), Expression::from_variable(x));
-    assert!(is_all_scalar(&expr));
-}
-
-#[test]
-fn is_all_scalar_false_once_any_leaf_is_non_scalar() {
-    let w = Variable::new(1, (3, 1));
-    assert!(!is_all_scalar(&Expression::from_variable(w)));
-}
-
-#[test]
-fn is_all_scalar_false_for_any_expression_containing_sum() {
-    let x = scalar_var(1);
-    let expr = Expression::sum(Expression::from_variable(x));
-    assert!(!is_all_scalar(&expr));
-}
-
-#[test]
-fn scalar_quadratic_nested_in_a_vector_tree_is_rejected() {
-    // Add(x * x, w) with w a (3, 1) variable: once routed through
-    // linearize_shaped, the nested x * x product is restricted to
-    // affine terms (SPEC-0014 Non-Objective), even though x * x alone
-    // would be fine via quadratize.
+fn scalar_quadratic_nested_in_a_vector_tree_is_accepted() {
+    // Add(x * x, w) with w a (3, 1) variable: SPEC-0016 lifts the
+    // "any non-scalar leaf forces affine-only" restriction, so the
+    // nested x * x product now produces a genuine quadratic term,
+    // broadcast identically across every entry of w.
     let x = scalar_var(1);
     let w = Variable::new(2, (3, 1));
     let (offsets, n_total) = offsets_of(&[x, w]);
@@ -390,8 +399,14 @@ fn scalar_quadratic_nested_in_a_vector_tree_is_rejected() {
         Expression::mul(x_expr.clone(), x_expr),
         Expression::from_variable(w),
     );
-    let err = reduce_expression(&expr, &offsets, n_total).unwrap_err();
-    assert_eq!(err, VECTOR_MUL_ERROR);
+    let form = reduce_expression(&expr, &offsets, n_total).unwrap();
+    assert_eq!(form.shape, (3, 1));
+    for k in 0..3 {
+        assert_eq!(form.entries[k].quad, vec![(0, 0, 1.0)]);
+        let mut expected_linear = vec![0.0; n_total];
+        expected_linear[1 + k] = 1.0;
+        assert_eq!(form.entries[k].linear, expected_linear);
+    }
 }
 
 #[test]
@@ -432,16 +447,70 @@ fn sum_of_a_scalar_is_an_identity() {
 }
 
 #[test]
-fn sum_of_scalar_quadratic_is_rejected() {
-    // Sum(x * x): an all-(1,1)-leaf tree containing Sum is still routed
-    // through linearize_shaped (is_all_scalar's Sum arm), so the nested
-    // quadratic product is rejected.
+fn sum_of_scalar_quadratic_is_accepted() {
+    // Sum(x * x): SPEC-0016 lifts the "Sum forces affine-only"
+    // restriction, so this now reduces to the same quadratic form x * x
+    // alone would.
     let x = scalar_var(1);
     let (offsets, n_total) = offsets_of(&[x]);
     let x_expr = Expression::from_variable(x);
     let expr = Expression::sum(Expression::mul(x_expr.clone(), x_expr));
+    let form = reduce_expression(&expr, &offsets, n_total).unwrap();
+    assert_eq!(form.shape, (1, 1));
+    assert_eq!(form.entries[0].quad, vec![(0, 0, 1.0)]);
+}
+
+#[test]
+fn sum_of_squared_differences_is_quadratic() {
+    // CVX.SUM(CVX.MUL(diff, diff)) where diff = x - b (a (2, 1) vector
+    // variable minus a (2, 1) parameter): the least-squares building
+    // block (SPEC-0016, ISSUE-0016), summing each entry's squared
+    // residual into one aggregated quadratic objective.
+    let x = Variable::new(1, (2, 1));
+    let (offsets, n_total) = offsets_of(&[x]);
+    let b = Expression::from_parameter(2, (2, 1), vec![1.0, 2.0]);
+    let diff = Expression::sub(Expression::from_variable(x), b);
+    let expr = Expression::sum(Expression::mul(diff.clone(), diff));
+    let form = reduce_expression(&expr, &offsets, n_total).unwrap();
+    assert_eq!(form.shape, (1, 1));
+    assert_eq!(
+        sorted_quad(form.entries[0].quad.clone()),
+        vec![(0, 0, 1.0), (1, 1, 1.0)]
+    );
+    assert_eq!(form.entries[0].linear, vec![-2.0, -4.0]);
+    assert_eq!(form.entries[0].constant, 5.0);
+}
+
+#[test]
+fn matmul_transpose_self_dot_product_is_quadratic() {
+    // x.T @ x for a (3, 1) variable x: the sum-of-squares building block
+    // via MatMul/Transpose instead of Sum/Mul, producing the identity
+    // quadratic form (SPEC-0016, ISSUE-0016's portfolio-risk-style
+    // x.T @ sigma @ x is the same pattern with a weighting parameter
+    // matrix between the two x's).
+    let x = Variable::new(1, (3, 1));
+    let (offsets, n_total) = offsets_of(&[x]);
+    let x_expr = Expression::from_variable(x);
+    let expr = Expression::matmul(Expression::transpose(x_expr.clone()), x_expr);
+    let form = reduce_expression(&expr, &offsets, n_total).unwrap();
+    assert_eq!(form.shape, (1, 1));
+    assert_eq!(
+        sorted_quad(form.entries[0].quad.clone()),
+        vec![(0, 0, 1.0), (1, 1, 1.0), (2, 2, 1.0)]
+    );
+}
+
+#[test]
+fn degree_three_vector_product_is_still_rejected() {
+    // w .* w .* w for a (3, 1) variable w: still degree 3, rejected with
+    // the same DEGREE_ERROR a scalar degree-3 product uses (SPEC-0016
+    // unifies the message across shapes).
+    let w = Variable::new(1, (3, 1));
+    let (offsets, n_total) = offsets_of(&[w]);
+    let w_expr = Expression::from_variable(w);
+    let expr = Expression::mul(Expression::mul(w_expr.clone(), w_expr.clone()), w_expr);
     let err = reduce_expression(&expr, &offsets, n_total).unwrap_err();
-    assert_eq!(err, VECTOR_MUL_ERROR);
+    assert_eq!(err, DEGREE_ERROR);
 }
 
 // --- Index tests (SPEC-0015) ---
@@ -539,39 +608,32 @@ fn index_out_of_bounds_is_a_descriptive_error_not_a_panic() {
 }
 
 #[test]
-fn is_all_scalar_false_for_any_expression_containing_index() {
-    let x = scalar_var(1);
-    let expr = Expression::index(Expression::from_variable(x), 0, 0, 1, 1);
-    assert!(!is_all_scalar(&expr));
-}
-
-#[test]
-fn index_of_scalar_quadratic_is_rejected() {
-    // Index(x * x, 0, 0, 1, 1): an all-(1,1)-leaf tree containing Index is
-    // still routed through linearize_shaped (is_all_scalar's Index arm),
-    // so the nested quadratic product is rejected, same as Sum.
+fn index_of_scalar_quadratic_is_accepted() {
+    // Index(x * x, 0, 0, 1, 1): SPEC-0016 lifts the "Index forces
+    // affine-only" restriction, same as Sum above.
     let x = scalar_var(1);
     let (offsets, n_total) = offsets_of(&[x]);
     let x_expr = Expression::from_variable(x);
     let expr = Expression::index(Expression::mul(x_expr.clone(), x_expr), 0, 0, 1, 1);
-    let err = reduce_expression(&expr, &offsets, n_total).unwrap_err();
-    assert_eq!(err, VECTOR_MUL_ERROR);
+    let form = reduce_expression(&expr, &offsets, n_total).unwrap();
+    assert_eq!(form.shape, (1, 1));
+    assert_eq!(form.entries[0].quad, vec![(0, 0, 1.0)]);
 }
 
 #[test]
-fn mul_of_two_index_derived_scalars_is_rejected() {
+fn mul_of_two_index_derived_scalars_is_quadratic() {
     // CVX.INDEX(X, 1, 1) * CVX.INDEX(X, 1, 2): two non-constant Index
-    // operands multiplied together, forced through linearize_shaped,
-    // fails with the existing VECTOR_MUL_ERROR (no new quadratic support
-    // over Index is introduced).
+    // operands multiplied together now produce the expected cross-term
+    // quadratic form (SPEC-0016).
     let x = Variable::new(1, (1, 2));
     let (offsets, n_total) = offsets_of(&[x]);
     let x_expr = Expression::from_variable(x);
     let left = Expression::index(x_expr.clone(), 0, 0, 1, 1);
     let right = Expression::index(x_expr, 0, 1, 1, 1);
     let expr = Expression::mul(left, right);
-    let err = reduce_expression(&expr, &offsets, n_total).unwrap_err();
-    assert_eq!(err, VECTOR_MUL_ERROR);
+    let form = reduce_expression(&expr, &offsets, n_total).unwrap();
+    assert_eq!(form.shape, (1, 1));
+    assert_eq!(form.entries[0].quad, vec![(0, 1, 1.0)]);
 }
 
 // --- MatMul/Transpose tests (SPEC-0018) ---
@@ -701,13 +763,21 @@ fn matmul_of_incompatible_shapes_is_a_descriptive_error_not_a_panic() {
 }
 
 #[test]
-fn matmul_of_two_variable_dependent_operands_is_rejected() {
+fn matmul_of_two_variable_dependent_operands_is_quadratic() {
+    // y @ x for y (1, 3) and x (3, 1) variables: a genuine dot product of
+    // two variable vectors, now reduced to the expected quadratic form
+    // (SPEC-0016, resolving what SPEC-0018 explicitly deferred) instead
+    // of being rejected.
     let x = Variable::new(1, (3, 1));
     let y = Variable::new(2, (1, 3));
     let (offsets, n_total) = offsets_of(&[x, y]);
     let expr = Expression::matmul(Expression::from_variable(y), Expression::from_variable(x));
-    let err = linearize_shaped(&expr, &offsets, n_total).unwrap_err();
-    assert_eq!(err, VECTOR_MUL_ERROR);
+    let form = linearize_shaped(&expr, &offsets, n_total).unwrap();
+    assert_eq!(form.shape, (1, 1));
+    assert_eq!(
+        sorted_quad(form.entries[0].quad.clone()),
+        vec![(0, 3, 1.0), (1, 4, 1.0), (2, 5, 1.0)]
+    );
 }
 
 #[test]
@@ -755,40 +825,14 @@ fn matmul_nested_inside_matmul_operand_reduces_correctly() {
 }
 
 #[test]
-fn is_all_scalar_false_for_any_expression_containing_matmul_even_when_all_1x1() {
-    let x = scalar_var(1);
-    let expr = Expression::matmul(Expression::from_variable(x), Expression::constant(2.0));
-    assert!(!is_all_scalar(&expr));
-}
-
-#[test]
-fn is_all_scalar_true_for_a_bare_transpose_of_an_otherwise_scalar_expression() {
-    let x = scalar_var(1);
-    let expr = Expression::transpose(Expression::from_variable(x));
-    assert!(is_all_scalar(&expr));
-}
-
-#[test]
-fn is_all_scalar_false_for_transpose_nested_inside_matmul() {
-    let x = scalar_var(1);
-    let expr = Expression::matmul(
-        Expression::transpose(Expression::from_variable(x)),
-        Expression::constant(2.0),
-    );
-    assert!(!is_all_scalar(&expr));
-}
-
-#[test]
 fn transpose_of_scalar_quadratic_preserves_quadratic_support() {
-    // Transpose(x * x) for a scalar x: is_all_scalar recurses through
-    // Transpose (SPEC-0018), so this is routed through the
-    // quadratic-capable quadratize, unlike Sum/Index/MatMul wrapping the
-    // same x * x term (which always force the affine-only path).
+    // Transpose(x * x) for a scalar x: Transpose is a no-op on a (1, 1)
+    // operand, and the nested x * x product still reduces to the
+    // expected quadratic form.
     let x = scalar_var(1);
     let (offsets, n_total) = offsets_of(&[x]);
     let x_expr = Expression::from_variable(x);
     let expr = Expression::transpose(Expression::mul(x_expr.clone(), x_expr));
-    assert!(is_all_scalar(&expr));
     let form = reduce_expression(&expr, &offsets, n_total).unwrap();
     assert_eq!(form.shape, (1, 1));
     assert_eq!(form.entries[0].quad, vec![(0, 0, 1.0)]);
