@@ -52,25 +52,52 @@ Returns a `cvx:prob:<uuid>` handle.
 Returns a `cvx:result:<uuid>` handle on `Optimal`, `Infeasible`, or
 `Unbounded` outcomes.
 
-`cvxrust` solves problems built from scalar (`1x1`) variables and
-parameters: affine or convex quadratic objectives subject to affine
+`cvxrust` solves affine or convex quadratic objectives subject to affine
 `<=`/`>=`/`=` constraints and convex quadratic `<=`/`>=` constraints, by
 translating the problem into a conic program and delegating to the
 `clarabel` solver. A quadratic term is any product of two
-variable-dependent sub-expressions (e.g. `x * x` or `x * y`). Problems
-outside this class fail with a descriptive error and return `#VALUE!` (no
-result is stored):
+variable-dependent sub-expressions (e.g. `x * x` or `x * y`).
 
-- a variable or parameter with a shape other than `(1, 1)`;
+Variables and parameters may be a vector or a matrix, not just a single
+number (`1x1`): constraints broadcast per-entry, the same way
+`CVX.ADD`/`CVX.SUB`/`CVX.MUL`/`CVX.DIV` already broadcast when building
+expressions — a `(1, 1)` operand broadcasts against the other side's
+shape, equal shapes combine entrywise, and a declared constraint produces
+one solved row per output entry. The **objective**, however, must still
+evaluate to a single value (shape `1x1`); use `CVX.SUM(operand, [name])` to
+reduce a vector/matrix expression's entries down to one number (e.g.
+`=CVX.SUM(CVX.MUL(weights, x))` for a weighted total) — a vector/matrix
+variable may otherwise be declared and freely used in constraints without
+ever appearing in the objective. Quadratic support (`x * x`, `x * y`)
+remains limited to objectives/constraint sides built exclusively from
+`1x1` variables and parameters — once any vector/matrix (non-`1x1`)
+variable or parameter, or `CVX.SUM`, appears anywhere in an objective or a
+constraint side, that side is restricted to affine (degree-1) terms.
+
+Problems outside this class fail with a descriptive error and return
+`#VALUE!` (no result is stored):
+
 - a term of degree 3 or higher (a product or quotient involving three or
   more variable-dependent sub-expressions);
+- a product or quotient of two variable-dependent terms where a
+  vector/matrix (non-`1x1`) variable or parameter, or `CVX.SUM`, is
+  involved anywhere in that objective or constraint side (quadratic terms
+  remain supported only between operands built exclusively from `1x1`
+  variables and parameters);
+- an objective that does not evaluate to a single value (e.g. a bare
+  vector/matrix variable used directly as the objective, without
+  `CVX.SUM`);
+- mismatched, non-broadcastable shapes on the two sides of a constraint,
+  or the two operands of `CVX.ADD`/`CVX.SUB`/`CVX.MUL`/`CVX.DIV`;
 - a quadratic **equality** constraint (`==`) — only quadratic `<=`/`>=`
   constraints are supported;
 - a quadratic constraint whose coefficient matrix is not positive
   semidefinite (i.e. not convex);
 - division by zero, or division by a variable-dependent term;
-- a problem exceeding the solver's size limit (200 variables / 200
-  constraints).
+- a problem exceeding the solver's size limit (200 scalar variables / 200
+  scalar constraint rows — counting every entry of every vector/matrix
+  variable and every broadcast constraint row, not just the number of
+  declared variables/constraints).
 
 ## Error conditions
 

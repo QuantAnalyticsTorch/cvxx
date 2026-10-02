@@ -2,7 +2,7 @@
 id: SPEC-0014
 title: Affine solving for vector and matrix variables and parameters
 issue: ISSUE-0014
-status: draft
+status: implemented
 created: 2026-10-02
 ---
 
@@ -810,3 +810,39 @@ example showing a weighted total:
   formerly scoped to ISSUE-0015 is implemented here instead, folded into
   ISSUE-0014 (see that issue's updated Notes).
 - No new external crate dependencies.
+
+## Status
+
+Implemented in `cvxrust/src/lib.rs`: `Expression` gained a `Sum(Box<Expression>)`
+variant and `Expression::sum`; `validate_shapes` was removed and
+`check_expr_shapes` repurposed as the boolean `is_all_scalar` predicate
+(with a new `Sum` arm that always disqualifies); `QuadraticForm` gained
+`#[derive(Clone)]`; a new `ShapedForm`/`broadcast_shape`/`entry_at`/
+`linearize_shaped`/`reduce` set of private helpers implements the
+affine, shape-broadcasting reduction and routing exactly as specified;
+`quadratize` gained a defensive (never-reached) `Sum` arm for match
+exhaustiveness; `solve` was updated to compute `offsets`/`n_total` from
+variable shapes, check the reworded `SIZE_LIMIT_ERROR` against total scalar
+variables and (incrementally, per-constraint) total scalar constraint rows,
+route the objective and each constraint side through `reduce`, broadcast
+constraint `lhs`/`rhs` into one row per output entry, and recover
+`variable_values` by slicing the solver's solution vector per variable's
+own shape. `src/analytics/shape.rs` (`infer_shape`/`render_expression`)
+gained a `Sum` arm. `src/excel/expression.rs` gained `CVX.SUM` (reusing
+`run_unary` unchanged); `src/excel/mod.rs` registers it. The one required
+test update (`src/excel/problem.rs::solve_reports_excel_error_and_does_not_store_a_result`)
+and the two `cvxrust` tests asserting the old blanket shape/size-limit
+messages were updated to the new wording. `docs/problems.md` and
+`docs/expressions.md` were updated per Error Handling/Documentation above.
+
+Added 26 new `cvxrust` unit/end-to-end tests (61 total, up from 35) covering
+`linearize_shaped`'s every arm, `is_all_scalar`/`reduce` routing (including
+the documented nested-quadratic-in-a-vector-tree and `Sum`-forces-affine
+cases), and end-to-end solves (boxed vector *and* matrix variables, a mixed
+scalar/vector problem, an elementwise-`Mul` equality constraint, a scalar
+quadratic constraint broadcast against a vector parameter, a
+budget-allocation LP using `CVX.SUM`, the bare-vector-objective error vs.
+`Sum`-wrapped success, and the reworded size-limit error) plus 1 new
+`src/analytics/shape.rs` test for `Sum`'s shape/rendering. `cargo fmt` and
+`cargo clippy --all-targets -- -D warnings` are clean; the full workspace
+test suite (61 + 138 tests) passes with no regressions.

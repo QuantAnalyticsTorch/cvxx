@@ -2,7 +2,7 @@
 id: ISSUE-0014
 title: Solve problems with vector and matrix variables and parameters
 priority: must
-status: draft
+status: done
 created: 2026-10-01
 ---
 

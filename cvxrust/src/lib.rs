@@ -62,6 +62,9 @@ pub enum Expression {
     Neg(Box<Expression>),
     /// Scaling by a scalar constant.
     Scale { scalar: f64, expr: Box<Expression> },
+    /// The sum of every entry of a (possibly vector/matrix-shaped)
+    /// expression, reduced to a `(1, 1)` value (SPEC-0014).
+    Sum(Box<Expression>),
 }
 
 impl Expression {
@@ -116,6 +119,13 @@ impl Expression {
             scalar,
             expr: Box::new(expr),
         }
+    }
+
+    /// Creates a sum-reduction expression: every entry of `expr` (which may
+    /// be vector/matrix-shaped) collapsed into a single `(1, 1)` value
+    /// (SPEC-0014).
+    pub fn sum(expr: Expression) -> Self {
+        Expression::Sum(Box::new(expr))
     }
 }
 
@@ -195,7 +205,7 @@ const PSD_TOLERANCE: f64 = 1e-8;
 /// positionally aligned with a problem's variable list. `quad` is empty for
 /// a purely affine expression, which is the common case and takes the same
 /// code paths as a plain affine form throughout `solve`.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct QuadraticForm {
     constant: f64,
     linear: Vec<f64>,
@@ -306,22 +316,14 @@ fn outer_product_symmetrized(a: &[f64], b: &[f64]) -> Vec<(usize, usize, f64)> {
     result
 }
 
-/// Step 1 — checks that every variable/parameter reachable from `problem`
-/// has shape `(1, 1)`.
-fn validate_shapes(problem: &Problem) -> Result<(), String> {
-    const SHAPE_ERROR: &str = "solver only supports scalar (1x1) variables and parameters";
-
-    for variable in &problem.variables {
-        if variable.shape != (1, 1) {
-            return Err(SHAPE_ERROR.to_string());
-        }
-    }
-    check_expr_shapes(&problem.objective)?;
-    for constraint in &problem.constraints {
-        check_expr_shapes(&constraint.lhs)?;
-        check_expr_shapes(&constraint.rhs)?;
-    }
-    Ok(())
+/// `true` when every `Variable`/`Parameter` leaf reachable from `expr` has
+/// shape `(1, 1)` **and** `expr` contains no `Sum` node. (`Sum` always
+/// collapses its operand to `(1, 1)`, but — like a non-scalar leaf — it
+/// forces the affine-only `linearize_shaped` path; see below.) Preserves
+/// SPEC-0011's quadratic support exactly for any expression where this is
+/// `true`.
+fn is_all_scalar(expr: &Expression) -> bool {
+    check_expr_shapes(expr).is_ok()
 }
 
 fn check_expr_shapes(expr: &Expression) -> Result<(), String> {
@@ -352,6 +354,206 @@ fn check_expr_shapes(expr: &Expression) -> Result<(), String> {
         }
         Expression::Neg(e) => check_expr_shapes(e),
         Expression::Scale { expr, .. } => check_expr_shapes(expr),
+        Expression::Sum(_) => Err(SHAPE_ERROR.to_string()),
+    }
+}
+
+/// Row-major reduction of a (possibly vector/matrix-shaped) `Expression`:
+/// one `QuadraticForm` per output entry, over the problem's full
+/// `n_total`-long scalar-variable space. Every entry's `quad` is empty
+/// unless `shape == (1, 1)` (see [`reduce`]'s routing rule, SPEC-0014).
+#[derive(Debug)]
+struct ShapedForm {
+    shape: (usize, usize),
+    /// Row-major, length == shape.0 * shape.1.
+    entries: Vec<QuadraticForm>,
+}
+
+/// Broadcasts two shapes per the existing `cvxx` diagnostic rule
+/// (`src/analytics/shape.rs::broadcast_shape`, duplicated here since
+/// `cvxrust` does not depend on `cvxx`): a `(1, 1)` operand broadcasts to
+/// the other operand's shape; otherwise the two shapes must be equal.
+fn broadcast_shape(a: (usize, usize), b: (usize, usize)) -> Result<(usize, usize), String> {
+    if a == (1, 1) {
+        Ok(b)
+    } else if b == (1, 1) || a == b {
+        Ok(a)
+    } else {
+        Err(format!(
+            "shape mismatch: {}x{} vs {}x{}",
+            a.0, a.1, b.0, b.1
+        ))
+    }
+}
+
+/// Reads shaped-form entry `k` (row-major), broadcasting a `(1, 1)` form's
+/// single entry across every `k` when `form.shape != (1, 1)`.
+fn entry_at(form: &ShapedForm, k: usize) -> &QuadraticForm {
+    if form.shape == (1, 1) {
+        &form.entries[0]
+    } else {
+        &form.entries[k]
+    }
+}
+
+const VECTOR_MUL_ERROR: &str = "solver only supports linear (affine) \
+objectives and constraints once a vector or matrix (non-1x1) variable or \
+parameter is involved; a product of two variable-dependent terms was found";
+
+const VECTOR_DIV_ERROR: &str = "solver only supports linear (affine) \
+objectives and constraints once a vector or matrix (non-1x1) variable or \
+parameter is involved; division by a variable-dependent term was found";
+
+/// Affine, shape-broadcasting reduction used whenever `is_all_scalar`
+/// is `false` for the top-level expression being reduced (SPEC-0014).
+/// Recurses into itself (not [`reduce`]): once a non-`(1, 1)` leaf or a
+/// `Sum` appears anywhere in an objective or constraint side, the entire
+/// side is restricted to affine (degree <= 1) arithmetic, even for an
+/// otherwise-scalar sub-expression nested inside it. This is a deliberate
+/// scope boundary (SPEC-0014 Non-Objective), not an oversight.
+fn linearize_shaped(
+    expr: &Expression,
+    offsets: &HashMap<u64, usize>,
+    n_total: usize,
+) -> Result<ShapedForm, String> {
+    match expr {
+        Expression::Constant(c) => Ok(ShapedForm {
+            shape: (1, 1),
+            entries: vec![QuadraticForm::zero(n_total, *c)],
+        }),
+        Expression::Parameter { shape, data, .. } => Ok(ShapedForm {
+            shape: *shape,
+            entries: data
+                .iter()
+                .map(|&c| QuadraticForm::zero(n_total, c))
+                .collect(),
+        }),
+        Expression::Variable(v) => match offsets.get(&v.id) {
+            Some(&off) => {
+                let count = v.shape.0 * v.shape.1;
+                let entries = (0..count)
+                    .map(|k| {
+                        let mut form = QuadraticForm::zero(n_total, 0.0);
+                        form.linear[off + k] = 1.0;
+                        form
+                    })
+                    .collect();
+                Ok(ShapedForm {
+                    shape: v.shape,
+                    entries,
+                })
+            }
+            None => Err(
+                "objective or constraint references a variable not included \
+                 in the problem's variable list"
+                    .to_string(),
+            ),
+        },
+        Expression::Add(l, r) | Expression::Sub(l, r) => {
+            let lf = linearize_shaped(l, offsets, n_total)?;
+            let rf = linearize_shaped(r, offsets, n_total)?;
+            let shape = broadcast_shape(lf.shape, rf.shape)?;
+            let count = shape.0 * shape.1;
+            let is_add = matches!(expr, Expression::Add(..));
+            let entries = (0..count)
+                .map(|k| {
+                    let l_entry = entry_at(&lf, k).clone();
+                    let r_entry = entry_at(&rf, k);
+                    if is_add {
+                        l_entry.add(r_entry)
+                    } else {
+                        l_entry.sub(r_entry)
+                    }
+                })
+                .collect();
+            Ok(ShapedForm { shape, entries })
+        }
+        Expression::Mul(l, r) => {
+            let lf = linearize_shaped(l, offsets, n_total)?;
+            let rf = linearize_shaped(r, offsets, n_total)?;
+            let shape = broadcast_shape(lf.shape, rf.shape)?;
+            let count = shape.0 * shape.1;
+            let mut entries = Vec::with_capacity(count);
+            for k in 0..count {
+                let l_entry = entry_at(&lf, k);
+                let r_entry = entry_at(&rf, k);
+                entries.push(if l_entry.is_constant() {
+                    r_entry.clone().scale(l_entry.constant)
+                } else if r_entry.is_constant() {
+                    l_entry.clone().scale(r_entry.constant)
+                } else {
+                    return Err(VECTOR_MUL_ERROR.to_string());
+                });
+            }
+            Ok(ShapedForm { shape, entries })
+        }
+        Expression::Div(l, r) => {
+            let lf = linearize_shaped(l, offsets, n_total)?;
+            let rf = linearize_shaped(r, offsets, n_total)?;
+            let shape = broadcast_shape(lf.shape, rf.shape)?;
+            let count = shape.0 * shape.1;
+            let mut entries = Vec::with_capacity(count);
+            for k in 0..count {
+                let l_entry = entry_at(&lf, k);
+                let r_entry = entry_at(&rf, k);
+                if !r_entry.is_constant() {
+                    return Err(VECTOR_DIV_ERROR.to_string());
+                }
+                if r_entry.constant.abs() < 1e-12 {
+                    return Err("division by zero in objective or constraint".to_string());
+                }
+                entries.push(l_entry.clone().scale(1.0 / r_entry.constant));
+            }
+            Ok(ShapedForm { shape, entries })
+        }
+        Expression::Neg(e) => {
+            let f = linearize_shaped(e, offsets, n_total)?;
+            Ok(ShapedForm {
+                shape: f.shape,
+                entries: f.entries.into_iter().map(|e| e.negate()).collect(),
+            })
+        }
+        Expression::Scale { scalar, expr } => {
+            let f = linearize_shaped(expr, offsets, n_total)?;
+            Ok(ShapedForm {
+                shape: f.shape,
+                entries: f.entries.into_iter().map(|e| e.scale(*scalar)).collect(),
+            })
+        }
+        Expression::Sum(e) => {
+            let inner = linearize_shaped(e, offsets, n_total)?;
+            let summed = inner
+                .entries
+                .into_iter()
+                .fold(QuadraticForm::zero(n_total, 0.0), |acc, entry| {
+                    acc.add(&entry)
+                });
+            Ok(ShapedForm {
+                shape: (1, 1),
+                entries: vec![summed],
+            })
+        }
+    }
+}
+
+/// Reduces any (objective, or one constraint side) expression to a
+/// per-entry shaped form, routing through the quadratic-capable
+/// `quadratize` when `is_all_scalar` (preserving SPEC-0011 exactly) or the
+/// affine-only, shape-broadcasting `linearize_shaped` otherwise
+/// (SPEC-0014).
+fn reduce(
+    expr: &Expression,
+    offsets: &HashMap<u64, usize>,
+    n_total: usize,
+) -> Result<ShapedForm, String> {
+    if is_all_scalar(expr) {
+        let form = quadratize(expr, offsets, n_total)?;
+        Ok(ShapedForm {
+            shape: (1, 1),
+            entries: vec![form],
+        })
+    } else {
+        linearize_shaped(expr, offsets, n_total)
     }
 }
 
@@ -428,6 +630,20 @@ fn quadratize(
                         .to_string(),
                 )
             }
+        }
+        Expression::Sum(e) => {
+            // By construction, `quadratize` is only ever invoked when
+            // `is_all_scalar` is `true`, and `is_all_scalar` returns `false`
+            // for any expression containing `Sum` anywhere (SPEC-0014), so
+            // this arm is unreachable in practice. It is still implemented
+            // defensively (not `unreachable!()`) to keep this match
+            // exhaustive without ever panicking on malformed-but-well-typed
+            // input, consistent with the rest of this module.
+            let inner = reduce(e, index, n)?;
+            Ok(inner
+                .entries
+                .into_iter()
+                .fold(QuadraticForm::zero(n, 0.0), |acc, x| acc.add(&x)))
         }
     }
 }
@@ -550,70 +766,90 @@ fn build_soc_block(diff: &QuadraticForm, n: usize) -> Result<Option<SocBlock>, S
 }
 
 /// Attempts to solve `problem` by translating it into a conic program and
-/// delegating to `clarabel`. See the crate-level docs and `SPEC-0010` for
-/// the supported problem class.
+/// delegating to `clarabel`. See the crate-level docs and `SPEC-0010`/
+/// `SPEC-0014` for the supported problem class.
 pub fn solve(problem: &Problem) -> Solution {
-    if problem.variables.len() > MAX_VARIABLES || problem.constraints.len() > MAX_CONSTRAINTS {
-        return error_solution(
-            "problem exceeds solver size limit (200 variables / 200 constraints)",
-        );
+    const SIZE_LIMIT_ERROR: &str =
+        "problem exceeds solver size limit (200 scalar variables / 200 scalar constraint rows)";
+
+    let mut offsets: HashMap<u64, usize> = HashMap::with_capacity(problem.variables.len());
+    let mut n_total = 0usize;
+    for v in &problem.variables {
+        offsets.insert(v.id, n_total);
+        n_total += v.shape.0 * v.shape.1;
     }
 
-    if let Err(message) = validate_shapes(problem) {
-        return error_solution(message);
+    if n_total > MAX_VARIABLES {
+        return error_solution(SIZE_LIMIT_ERROR);
     }
 
-    let n = problem.variables.len();
-    let mut index = HashMap::with_capacity(n);
-    for (i, variable) in problem.variables.iter().enumerate() {
-        index.insert(variable.id, i);
-    }
-
-    let obj = match quadratize(&problem.objective, &index, n) {
+    let obj_form = match reduce(&problem.objective, &offsets, n_total) {
         Ok(form) => form,
         Err(message) => return error_solution(message),
     };
+    if obj_form.shape != (1, 1) {
+        return error_solution(format!(
+            "objective must evaluate to a single value (shape 1x1); got shape {}x{}",
+            obj_form.shape.0, obj_form.shape.1
+        ));
+    }
+    let obj = obj_form.entries.into_iter().next().unwrap();
 
-    // Reduce each constraint to `diff <relation> 0` (`diff = lhs - rhs`):
-    // affine constraints go into `rows` (unchanged from SPEC-0010), convex
-    // quadratic constraints are reduced to a second-order-cone row block in
-    // `soc_blocks` (SPEC-0011).
+    // Reduce each constraint to `diff <relation> 0` (`diff = lhs - rhs`),
+    // broadcasting `lhs`/`rhs` to a common shape and emitting one row per
+    // broadcast output entry (SPEC-0014): affine rows go into `rows`
+    // (unchanged from SPEC-0010), convex quadratic rows are reduced to a
+    // second-order-cone row block in `soc_blocks` (SPEC-0011).
     let mut rows: Vec<(Relation, Vec<f64>, f64)> = Vec::with_capacity(problem.constraints.len());
     let mut soc_blocks: Vec<SocBlock> = Vec::new();
+    let mut total_constraint_rows = 0usize;
     for constraint in &problem.constraints {
-        let lhs = match quadratize(&constraint.lhs, &index, n) {
+        let lhs = match reduce(&constraint.lhs, &offsets, n_total) {
             Ok(form) => form,
             Err(message) => return error_solution(message),
         };
-        let rhs = match quadratize(&constraint.rhs, &index, n) {
+        let rhs = match reduce(&constraint.rhs, &offsets, n_total) {
             Ok(form) => form,
             Err(message) => return error_solution(message),
         };
-        let mut diff = lhs.sub(&rhs);
-        let mut relation = constraint.relation;
+        let shape = match broadcast_shape(lhs.shape, rhs.shape) {
+            Ok(shape) => shape,
+            Err(message) => return error_solution(message),
+        };
+        let count = shape.0 * shape.1;
 
-        if !diff.is_affine() {
-            if relation == Relation::Equal {
-                return error_solution("quadratic equality constraints are not supported");
-            }
-            if relation == Relation::GreaterEqual {
-                diff = diff.negate();
-                relation = Relation::LessEqual;
-            }
-            match build_soc_block(&diff, n) {
-                Ok(Some(block)) => {
-                    soc_blocks.push(block);
-                    continue;
-                }
-                Ok(None) => {
-                    // The quadratic part cancels out numerically; fall
-                    // through to the ordinary affine row below.
-                }
-                Err(message) => return error_solution(message),
-            }
+        total_constraint_rows += count;
+        if total_constraint_rows > MAX_CONSTRAINTS {
+            return error_solution(SIZE_LIMIT_ERROR);
         }
 
-        rows.push((relation, diff.linear.clone(), -diff.constant));
+        for k in 0..count {
+            let mut diff = entry_at(&lhs, k).clone().sub(entry_at(&rhs, k));
+            let mut relation = constraint.relation;
+
+            if !diff.is_affine() {
+                if relation == Relation::Equal {
+                    return error_solution("quadratic equality constraints are not supported");
+                }
+                if relation == Relation::GreaterEqual {
+                    diff = diff.negate();
+                    relation = Relation::LessEqual;
+                }
+                match build_soc_block(&diff, n_total) {
+                    Ok(Some(block)) => {
+                        soc_blocks.push(block);
+                        continue;
+                    }
+                    Ok(None) => {
+                        // The quadratic part cancels out numerically; fall
+                        // through to the ordinary affine row below.
+                    }
+                    Err(message) => return error_solution(message),
+                }
+            }
+
+            rows.push((relation, diff.linear.clone(), -diff.constant));
+        }
     }
 
     // Group affine rows by cone: equalities first (ZeroConeT), then <= and
@@ -649,8 +885,9 @@ pub fn solve(problem: &Problem) -> Solution {
     // (no decision variables at all); evaluate that degenerate case
     // directly instead of invoking the solver. A quadratic (SOC)
     // constraint can never arise here, since it requires a variable-
-    // dependent product, so `soc_blocks` is always empty when `n == 0`.
-    if n == 0 {
+    // dependent product, so `soc_blocks` is always empty when
+    // `n_total == 0`.
+    if n_total == 0 {
         for (relation, _, row_rhs) in &rows {
             let ok = match relation {
                 Relation::Equal => row_rhs.abs() < 1e-9,
@@ -688,21 +925,21 @@ pub fn solve(problem: &Problem) -> Solution {
     // `clarabel` minimizes `(1/2) x^T P x + q^T x`; for `Maximize`, both `P`
     // and `q` are negated (`max f(x) = -min(-f(x))`).
     let p_matrix = if obj.is_affine() {
-        CscMatrix::<f64>::zeros((n, n))
+        CscMatrix::<f64>::zeros((n_total, n_total))
     } else {
         let sign = if problem.sense == Sense::Maximize {
             -1.0
         } else {
             1.0
         };
-        let dense = symmetric_dense(&obj.quad, n, 2.0 * sign, sign);
-        dense_rows_to_csc(&dense, n)
+        let dense = symmetric_dense(&obj.quad, n_total, 2.0 * sign, sign);
+        dense_rows_to_csc(&dense, n_total)
     };
     let q: Vec<f64> = match problem.sense {
         Sense::Minimize => obj.linear.clone(),
         Sense::Maximize => obj.linear.iter().map(|c| -c).collect(),
     };
-    let a_matrix = dense_rows_to_csc(&a_rows, n);
+    let a_matrix = dense_rows_to_csc(&a_rows, n_total);
 
     let settings = DefaultSettings {
         max_iter: MAX_ITERATIONS,
@@ -716,7 +953,13 @@ pub fn solve(problem: &Problem) -> Solution {
     match solver.solution.status {
         ClarabelStatus::Solved | ClarabelStatus::AlmostSolved => {
             let x = &solver.solution.x;
-            let variable_values = x.iter().map(|xi| vec![*xi]).collect();
+            let mut variable_values = Vec::with_capacity(problem.variables.len());
+            let mut cursor = 0usize;
+            for v in &problem.variables {
+                let count = v.shape.0 * v.shape.1;
+                variable_values.push(x[cursor..cursor + count].to_vec());
+                cursor += count;
+            }
             let quadratic_value: f64 = obj
                 .quad
                 .iter()
@@ -955,6 +1198,10 @@ mod tests {
 
     #[test]
     fn non_scalar_variable_is_a_shape_error() {
+        // A bare (2, 1) variable used directly as the objective is rejected
+        // because the objective must evaluate to a single value (SPEC-0014);
+        // the variable itself is no longer rejected outright (it may still
+        // be used, e.g., in constraints).
         let problem = Problem {
             sense: Sense::Minimize,
             objective: Expression::from_variable(Variable::new(1, (2, 1))),
@@ -965,13 +1212,15 @@ mod tests {
         assert_eq!(
             solution.status,
             SolveStatus::Error(
-                "solver only supports scalar (1x1) variables and parameters".to_string()
+                "objective must evaluate to a single value (shape 1x1); got shape 2x1".to_string()
             )
         );
     }
 
     #[test]
     fn non_scalar_parameter_is_a_shape_error() {
+        // Same as above, for a bare (2, 1) parameter used directly as the
+        // objective (SPEC-0014).
         let problem = Problem {
             sense: Sense::Minimize,
             objective: Expression::from_parameter(1, (2, 1), vec![1.0, 2.0]),
@@ -982,7 +1231,7 @@ mod tests {
         assert_eq!(
             solution.status,
             SolveStatus::Error(
-                "solver only supports scalar (1x1) variables and parameters".to_string()
+                "objective must evaluate to a single value (shape 1x1); got shape 2x1".to_string()
             )
         );
     }
@@ -1190,7 +1439,7 @@ mod tests {
         assert_eq!(
             solution.status,
             SolveStatus::Error(
-                "problem exceeds solver size limit (200 variables / 200 constraints)".to_string()
+                "problem exceeds solver size limit (200 scalar variables / 200 scalar constraint rows)".to_string()
             )
         );
     }
@@ -1419,5 +1668,466 @@ mod tests {
             rhs: Expression::constant(2.0),
         };
         assert_eq!(constraint.relation, Relation::LessEqual);
+    }
+
+    // --- vector/matrix affine solving + Sum tests (SPEC-0014) ---
+
+    fn offsets_of(vars: &[Variable]) -> (HashMap<u64, usize>, usize) {
+        let mut offsets = HashMap::with_capacity(vars.len());
+        let mut n_total = 0usize;
+        for v in vars {
+            offsets.insert(v.id, n_total);
+            n_total += v.shape.0 * v.shape.1;
+        }
+        (offsets, n_total)
+    }
+
+    #[test]
+    fn linearize_shaped_parameter_matches_its_data() {
+        let form = linearize_shaped(
+            &Expression::from_parameter(1, (3, 1), vec![10.0, 20.0, 30.0]),
+            &HashMap::new(),
+            0,
+        )
+        .unwrap();
+        assert_eq!(form.shape, (3, 1));
+        assert_eq!(
+            form.entries.iter().map(|e| e.constant).collect::<Vec<_>>(),
+            vec![10.0, 20.0, 30.0]
+        );
+        assert!(form
+            .entries
+            .iter()
+            .all(|e| e.linear.is_empty() || e.linear.iter().all(|c| *c == 0.0)));
+    }
+
+    #[test]
+    fn linearize_shaped_variable_is_one_hot_per_entry() {
+        let w = Variable::new(1, (2, 2));
+        let (offsets, n_total) = offsets_of(&[w]);
+        let form = linearize_shaped(&Expression::from_variable(w), &offsets, n_total).unwrap();
+        assert_eq!(form.shape, (2, 2));
+        assert_eq!(form.entries.len(), 4);
+        for (k, entry) in form.entries.iter().enumerate() {
+            assert_eq!(entry.constant, 0.0);
+            assert_eq!(entry.linear[k], 1.0);
+            assert_eq!(entry.linear.iter().filter(|c| **c != 0.0).count(), 1);
+        }
+    }
+
+    #[test]
+    fn linearize_shaped_add_broadcasts_scalar_across_vector() {
+        let w = Variable::new(1, (3, 1));
+        let (offsets, n_total) = offsets_of(&[w]);
+        let expr = Expression::add(Expression::from_variable(w), Expression::constant(5.0));
+        let form = linearize_shaped(&expr, &offsets, n_total).unwrap();
+        assert_eq!(form.shape, (3, 1));
+        for (k, entry) in form.entries.iter().enumerate() {
+            assert_eq!(entry.constant, 5.0);
+            assert_eq!(entry.linear[k], 1.0);
+        }
+    }
+
+    #[test]
+    fn linearize_shaped_add_combines_equal_shapes_entrywise() {
+        let w = Variable::new(1, (2, 1));
+        let v = Variable::new(2, (2, 1));
+        let (offsets, n_total) = offsets_of(&[w, v]);
+        let expr = Expression::add(Expression::from_variable(w), Expression::from_variable(v));
+        let form = linearize_shaped(&expr, &offsets, n_total).unwrap();
+        assert_eq!(form.shape, (2, 1));
+        assert_eq!(form.entries[0].linear, vec![1.0, 0.0, 1.0, 0.0]);
+        assert_eq!(form.entries[1].linear, vec![0.0, 1.0, 0.0, 1.0]);
+    }
+
+    #[test]
+    fn linearize_shaped_mismatched_shapes_is_a_shape_mismatch_error() {
+        let w = Variable::new(1, (2, 1));
+        let v = Variable::new(2, (3, 1));
+        let (offsets, n_total) = offsets_of(&[w, v]);
+        let expr = Expression::add(Expression::from_variable(w), Expression::from_variable(v));
+        let err = linearize_shaped(&expr, &offsets, n_total).unwrap_err();
+        assert_eq!(err, "shape mismatch: 2x1 vs 3x1");
+    }
+
+    #[test]
+    fn linearize_shaped_mul_by_constant_vector_is_affine() {
+        let w = Variable::new(1, (3, 1));
+        let (offsets, n_total) = offsets_of(&[w]);
+        let weights = Expression::from_parameter(2, (3, 1), vec![2.0, 3.0, 4.0]);
+        let expr = Expression::mul(weights, Expression::from_variable(w));
+        let form = linearize_shaped(&expr, &offsets, n_total).unwrap();
+        assert_eq!(form.shape, (3, 1));
+        assert_eq!(form.entries[0].linear, vec![2.0, 0.0, 0.0]);
+        assert_eq!(form.entries[1].linear, vec![0.0, 3.0, 0.0]);
+        assert_eq!(form.entries[2].linear, vec![0.0, 0.0, 4.0]);
+    }
+
+    #[test]
+    fn linearize_shaped_mul_of_two_variable_vectors_is_an_error() {
+        let w = Variable::new(1, (3, 1));
+        let v = Variable::new(2, (3, 1));
+        let (offsets, n_total) = offsets_of(&[w, v]);
+        let expr = Expression::mul(Expression::from_variable(w), Expression::from_variable(v));
+        let err = linearize_shaped(&expr, &offsets, n_total).unwrap_err();
+        assert_eq!(err, VECTOR_MUL_ERROR);
+    }
+
+    #[test]
+    fn linearize_shaped_div_by_constant_scales_every_entry() {
+        let w = Variable::new(1, (2, 1));
+        let (offsets, n_total) = offsets_of(&[w]);
+        let expr = Expression::div(Expression::from_variable(w), Expression::constant(2.0));
+        let form = linearize_shaped(&expr, &offsets, n_total).unwrap();
+        assert_eq!(form.entries[0].linear, vec![0.5, 0.0]);
+        assert_eq!(form.entries[1].linear, vec![0.0, 0.5]);
+    }
+
+    #[test]
+    fn linearize_shaped_div_by_variable_vector_is_an_error() {
+        let w = Variable::new(1, (2, 1));
+        let v = Variable::new(2, (2, 1));
+        let (offsets, n_total) = offsets_of(&[w, v]);
+        let expr = Expression::div(Expression::from_variable(w), Expression::from_variable(v));
+        let err = linearize_shaped(&expr, &offsets, n_total).unwrap_err();
+        assert_eq!(err, VECTOR_DIV_ERROR);
+    }
+
+    #[test]
+    fn linearize_shaped_neg_and_scale_preserve_shape() {
+        let w = Variable::new(1, (2, 1));
+        let (offsets, n_total) = offsets_of(&[w]);
+        let neg = linearize_shaped(
+            &Expression::neg(Expression::from_variable(w)),
+            &offsets,
+            n_total,
+        )
+        .unwrap();
+        assert_eq!(neg.shape, (2, 1));
+        assert_eq!(neg.entries[0].linear, vec![-1.0, 0.0]);
+
+        let scaled = linearize_shaped(
+            &Expression::scale(4.0, Expression::from_variable(w)),
+            &offsets,
+            n_total,
+        )
+        .unwrap();
+        assert_eq!(scaled.entries[1].linear, vec![0.0, 4.0]);
+    }
+
+    #[test]
+    fn is_all_scalar_true_for_all_1x1_leaves_even_with_quadratic_term() {
+        let x = scalar_var(1);
+        let expr = Expression::mul(Expression::from_variable(x), Expression::from_variable(x));
+        assert!(is_all_scalar(&expr));
+    }
+
+    #[test]
+    fn is_all_scalar_false_once_any_leaf_is_non_scalar() {
+        let w = Variable::new(1, (3, 1));
+        assert!(!is_all_scalar(&Expression::from_variable(w)));
+    }
+
+    #[test]
+    fn is_all_scalar_false_for_any_expression_containing_sum() {
+        let x = scalar_var(1);
+        let expr = Expression::sum(Expression::from_variable(x));
+        assert!(!is_all_scalar(&expr));
+    }
+
+    #[test]
+    fn scalar_quadratic_nested_in_a_vector_tree_is_rejected() {
+        // Add(x * x, w) with w a (3, 1) variable: once routed through
+        // linearize_shaped, the nested x * x product is restricted to
+        // affine terms (SPEC-0014 Non-Objective), even though x * x alone
+        // would be fine via quadratize.
+        let x = scalar_var(1);
+        let w = Variable::new(2, (3, 1));
+        let (offsets, n_total) = offsets_of(&[x, w]);
+        let x_expr = Expression::from_variable(x);
+        let expr = Expression::add(
+            Expression::mul(x_expr.clone(), x_expr),
+            Expression::from_variable(w),
+        );
+        let err = reduce(&expr, &offsets, n_total).unwrap_err();
+        assert_eq!(err, VECTOR_MUL_ERROR);
+    }
+
+    #[test]
+    fn sum_of_a_vector_variable_sums_its_one_hot_entries() {
+        let w = Variable::new(1, (3, 1));
+        let (offsets, n_total) = offsets_of(&[w]);
+        let form = reduce(
+            &Expression::sum(Expression::from_variable(w)),
+            &offsets,
+            n_total,
+        )
+        .unwrap();
+        assert_eq!(form.shape, (1, 1));
+        assert_eq!(form.entries[0].linear, vec![1.0, 1.0, 1.0]);
+    }
+
+    #[test]
+    fn sum_of_weighted_vector_gives_a_weighted_total() {
+        let w = Variable::new(1, (3, 1));
+        let (offsets, n_total) = offsets_of(&[w]);
+        let weights = Expression::from_parameter(2, (3, 1), vec![2.0, 3.0, 4.0]);
+        let expr = Expression::sum(Expression::mul(weights, Expression::from_variable(w)));
+        let form = reduce(&expr, &offsets, n_total).unwrap();
+        assert_eq!(form.shape, (1, 1));
+        assert_eq!(form.entries[0].linear, vec![2.0, 3.0, 4.0]);
+    }
+
+    #[test]
+    fn sum_of_a_scalar_is_an_identity() {
+        let form = reduce(
+            &Expression::sum(Expression::constant(7.0)),
+            &HashMap::new(),
+            0,
+        )
+        .unwrap();
+        assert_eq!(form.shape, (1, 1));
+        assert_eq!(form.entries[0].constant, 7.0);
+    }
+
+    #[test]
+    fn sum_of_scalar_quadratic_is_rejected() {
+        // Sum(x * x): an all-(1,1)-leaf tree containing Sum is still routed
+        // through linearize_shaped (is_all_scalar's Sum arm), so the nested
+        // quadratic product is rejected.
+        let x = scalar_var(1);
+        let (offsets, n_total) = offsets_of(&[x]);
+        let x_expr = Expression::from_variable(x);
+        let expr = Expression::sum(Expression::mul(x_expr.clone(), x_expr));
+        let err = reduce(&expr, &offsets, n_total).unwrap_err();
+        assert_eq!(err, VECTOR_MUL_ERROR);
+    }
+
+    #[test]
+    fn feasibility_only_problem_solves_a_boxed_matrix_variable() {
+        // minimize 0 subject to M >= [[1,2],[3,4]] and M <= [[1,2],[3,4]]
+        // (row-major), confirming genuine (rows, cols) matrix shapes (not
+        // just column vectors) solve correctly end-to-end.
+        let m = Variable::new(1, (2, 2));
+        let m_expr = Expression::from_variable(m);
+        let bound = Expression::from_parameter(2, (2, 2), vec![1.0, 2.0, 3.0, 4.0]);
+        let problem = Problem {
+            sense: Sense::Minimize,
+            objective: Expression::constant(0.0),
+            constraints: vec![
+                Constraint {
+                    relation: Relation::GreaterEqual,
+                    lhs: m_expr.clone(),
+                    rhs: bound.clone(),
+                },
+                Constraint {
+                    relation: Relation::LessEqual,
+                    lhs: m_expr,
+                    rhs: bound,
+                },
+            ],
+            variables: vec![m],
+        };
+        let solution = solve(&problem);
+        assert_eq!(solution.status, SolveStatus::Optimal);
+        assert_eq!(solution.variable_values.len(), 1);
+        for (got, want) in solution.variable_values[0].iter().zip([1.0, 2.0, 3.0, 4.0]) {
+            assert!((got - want).abs() < 1e-6);
+        }
+    }
+
+    #[test]
+    fn feasibility_only_problem_solves_a_boxed_vector_variable() {
+        // minimize 0 subject to w >= [1, 2, 3] and w <= [1, 2, 3]
+        let w = Variable::new(1, (3, 1));
+        let w_expr = Expression::from_variable(w);
+        let bound = Expression::from_parameter(2, (3, 1), vec![1.0, 2.0, 3.0]);
+        let problem = Problem {
+            sense: Sense::Minimize,
+            objective: Expression::constant(0.0),
+            constraints: vec![
+                Constraint {
+                    relation: Relation::GreaterEqual,
+                    lhs: w_expr.clone(),
+                    rhs: bound.clone(),
+                },
+                Constraint {
+                    relation: Relation::LessEqual,
+                    lhs: w_expr,
+                    rhs: bound,
+                },
+            ],
+            variables: vec![w],
+        };
+        let solution = solve(&problem);
+        assert_eq!(solution.status, SolveStatus::Optimal);
+        assert_eq!(solution.objective_value, Some(0.0));
+        assert_eq!(solution.variable_values.len(), 1);
+        for (got, want) in solution.variable_values[0].iter().zip([1.0, 2.0, 3.0]) {
+            assert!((got - want).abs() < 1e-6);
+        }
+    }
+
+    #[test]
+    fn mixed_scalar_and_vector_problem_solves_both_independently() {
+        // minimize x subject to x >= 3, with an unrelated (3, 1) variable w
+        // tightly boxed to [2, 2, 2].
+        let x = scalar_var(1);
+        let w = Variable::new(2, (3, 1));
+        let w_expr = Expression::from_variable(w);
+        let bound = Expression::from_parameter(3, (3, 1), vec![2.0, 2.0, 2.0]);
+        let problem = Problem {
+            sense: Sense::Minimize,
+            objective: Expression::from_variable(x),
+            constraints: vec![
+                Constraint {
+                    relation: Relation::GreaterEqual,
+                    lhs: Expression::from_variable(x),
+                    rhs: Expression::constant(3.0),
+                },
+                Constraint {
+                    relation: Relation::GreaterEqual,
+                    lhs: w_expr.clone(),
+                    rhs: bound.clone(),
+                },
+                Constraint {
+                    relation: Relation::LessEqual,
+                    lhs: w_expr,
+                    rhs: bound,
+                },
+            ],
+            variables: vec![x, w],
+        };
+        let solution = solve(&problem);
+        assert_eq!(solution.status, SolveStatus::Optimal);
+        assert!((solution.variable_values[0][0] - 3.0).abs() < 1e-6);
+        for got in &solution.variable_values[1] {
+            assert!((got - 2.0).abs() < 1e-6);
+        }
+    }
+
+    #[test]
+    fn elementwise_mul_equal_constraint_recovers_expected_values() {
+        // 2 .* w == [4, 6, 8] => w == [2, 3, 4]
+        let w = Variable::new(1, (3, 1));
+        let problem = Problem {
+            sense: Sense::Minimize,
+            objective: Expression::constant(0.0),
+            constraints: vec![Constraint {
+                relation: Relation::Equal,
+                lhs: Expression::scale(2.0, Expression::from_variable(w)),
+                rhs: Expression::from_parameter(2, (3, 1), vec![4.0, 6.0, 8.0]),
+            }],
+            variables: vec![w],
+        };
+        let solution = solve(&problem);
+        assert_eq!(solution.status, SolveStatus::Optimal);
+        for (got, want) in solution.variable_values[0].iter().zip([2.0, 3.0, 4.0]) {
+            assert!((got - want).abs() < 1e-6);
+        }
+    }
+
+    #[test]
+    fn scalar_quadratic_constraint_broadcasts_against_vector_parameter() {
+        // minimize -x subject to x^2 <= w, with w a (3, 1) parameter [4,4,4]
+        // (so x^2 <= 4 for every broadcast row; optimum at x = 2).
+        let x = scalar_var(1);
+        let x_expr = Expression::from_variable(x);
+        let problem = Problem {
+            sense: Sense::Minimize,
+            objective: Expression::neg(x_expr.clone()),
+            constraints: vec![Constraint {
+                relation: Relation::LessEqual,
+                lhs: Expression::mul(x_expr.clone(), x_expr),
+                rhs: Expression::from_parameter(2, (3, 1), vec![4.0, 4.0, 4.0]),
+            }],
+            variables: vec![x],
+        };
+        let solution = solve(&problem);
+        assert_eq!(solution.status, SolveStatus::Optimal);
+        assert!((solution.variable_values[0][0] - 2.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn budget_allocation_lp_with_sum_solves_the_least_cost_allocation() {
+        // minimize sum(cost .* x) subject to x >= [0,0,0] and sum(x) >= 10,
+        // with cost = [3, 1, 2] -> all budget should go to the cheapest
+        // entry (index 1, cost 1), giving x = [0, 10, 0] and objective 10.
+        let x = Variable::new(1, (3, 1));
+        let x_expr = Expression::from_variable(x);
+        let cost = Expression::from_parameter(2, (3, 1), vec![3.0, 1.0, 2.0]);
+        let zero = Expression::from_parameter(3, (3, 1), vec![0.0, 0.0, 0.0]);
+        let problem = Problem {
+            sense: Sense::Minimize,
+            objective: Expression::sum(Expression::mul(cost, x_expr.clone())),
+            constraints: vec![
+                Constraint {
+                    relation: Relation::GreaterEqual,
+                    lhs: x_expr.clone(),
+                    rhs: zero,
+                },
+                Constraint {
+                    relation: Relation::GreaterEqual,
+                    lhs: Expression::sum(x_expr),
+                    rhs: Expression::constant(10.0),
+                },
+            ],
+            variables: vec![x],
+        };
+        let solution = solve(&problem);
+        assert_eq!(solution.status, SolveStatus::Optimal);
+        assert!((solution.objective_value.unwrap() - 10.0).abs() < 1e-4);
+        assert!((solution.variable_values[0][1] - 10.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn bare_vector_objective_is_a_shape_error_but_sum_wrapped_succeeds() {
+        let w = Variable::new(1, (3, 1));
+        let w_expr = Expression::from_variable(w);
+
+        let bare_problem = Problem {
+            sense: Sense::Minimize,
+            objective: w_expr.clone(),
+            constraints: Vec::new(),
+            variables: vec![w],
+        };
+        assert_eq!(
+            solve(&bare_problem).status,
+            SolveStatus::Error(
+                "objective must evaluate to a single value (shape 1x1); got shape 3x1".to_string()
+            )
+        );
+
+        let summed_problem = Problem {
+            sense: Sense::Minimize,
+            objective: Expression::sum(w_expr.clone()),
+            constraints: vec![Constraint {
+                relation: Relation::GreaterEqual,
+                lhs: w_expr,
+                rhs: Expression::from_parameter(2, (3, 1), vec![1.0, 1.0, 1.0]),
+            }],
+            variables: vec![w],
+        };
+        let solution = solve(&summed_problem);
+        assert_eq!(solution.status, SolveStatus::Optimal);
+        assert!((solution.objective_value.unwrap() - 3.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn single_oversized_vector_variable_is_a_size_error() {
+        let w = Variable::new(1, (MAX_VARIABLES + 1, 1));
+        let problem = Problem {
+            sense: Sense::Minimize,
+            objective: Expression::constant(0.0),
+            constraints: Vec::new(),
+            variables: vec![w],
+        };
+        let solution = solve(&problem);
+        assert_eq!(
+            solution.status,
+            SolveStatus::Error(
+                "problem exceeds solver size limit (200 scalar variables / 200 scalar constraint rows)".to_string()
+            )
+        );
     }
 }

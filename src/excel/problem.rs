@@ -426,6 +426,9 @@ mod tests {
 
     #[test]
     fn solve_reports_excel_error_and_does_not_store_a_result() {
+        // A bare (2, 1) variable used directly as the objective is rejected
+        // because the objective must evaluate to a single value (SPEC-0014);
+        // the variable itself is no longer rejected outright.
         let registry = Registry::global();
         let var_handle = registry.insert_variable(None, (2, 1)).unwrap();
         let (_, var_uuid) = parse_handle(&var_handle).unwrap();
@@ -453,7 +456,7 @@ mod tests {
         assert_eq!(
             result.unwrap_err(),
             CvxError::SolveFailed(
-                "solver only supports scalar (1x1) variables and parameters".to_string()
+                "objective must evaluate to a single value (shape 1x1); got shape 2x1".to_string()
             )
         );
         assert!(registry

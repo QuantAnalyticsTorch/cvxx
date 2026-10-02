@@ -42,16 +42,27 @@ These functions compose expressions from existing handles instead of strings:
 =CVX.DIV(left_handle, right_handle, [name])
 =CVX.NEG(operand_handle, [name])
 =CVX.SCALE(operand_handle, scalar, [name])
+=CVX.SUM(operand_handle, [name])
 ```
 
 `left`, `right`, and `operand` can be parameter, variable, or expression
 handles. `scalar` must be a numeric constant.
+
+`CVX.ADD`/`CVX.SUB`/`CVX.MUL`/`CVX.DIV` work entrywise when either operand
+is a vector or a matrix: a `(1, 1)` operand broadcasts against the other
+side's shape, and operands of equal shape combine entry-by-entry (mismatched
+non-broadcastable shapes return `#VALUE!`). `CVX.SUM` reduces every entry of
+a (possibly vector/matrix-shaped) expression down to a single value —
+combined with `CVX.MUL`, this gives a weighted total, e.g.
+`=CVX.SUM(CVX.MUL(weights_handle, x_handle))`.
 
 ## Error conditions
 
 - Invalid expression syntax returns `#VALUE!`.
 - Unknown identifiers return `#VALUE!` and name the unresolved item.
 - Non-numeric `scalar` in `CVX.SCALE` returns `#VALUE!`.
+- Mismatched, non-broadcastable shapes between the two operands of
+  `CVX.ADD`/`CVX.SUB`/`CVX.MUL`/`CVX.DIV` return `#VALUE!`.
 - Duplicate names return `#VALUE!`.
 - Diagnostics are logged to `%TEMP%/cvxx.log`.
 

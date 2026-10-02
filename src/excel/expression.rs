@@ -92,6 +92,14 @@ pub extern "system" fn cvx_neg(operand: LPXLOPER12, name: LPXLOPER12) -> LPXLOPE
     to_xloper_result(result, "CVX.NEG")
 }
 
+/// `CVX.SUM(operand, [name])` — sums every entry of a (possibly
+/// vector/matrix-shaped) expression into a single value (SPEC-0014).
+#[export_name = "CVX.SUM"]
+pub extern "system" fn cvx_sum(operand: LPXLOPER12, name: LPXLOPER12) -> LPXLOPER12 {
+    let result = run_unary(operand, name, Expression::sum);
+    to_xloper_result(result, "CVX.SUM")
+}
+
 /// `CVX.SCALE(operand, scalar, [name])` — scales an expression by a scalar.
 #[export_name = "CVX.SCALE"]
 pub extern "system" fn cvx_scale(

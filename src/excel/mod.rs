@@ -119,6 +119,18 @@ pub extern "system" fn xlAutoOpen() -> i32 {
     );
 
     reg.add(
+        "CVX.SUM",
+        "QQQ$",
+        "operand, name",
+        "cvxx",
+        "Sums every entry of a cvxx expression into a single value and returns the resulting handle.",
+        &[
+            "Handle of the (possibly vector/matrix-shaped) expression to sum.",
+            "Optional unique name for the result.",
+        ],
+    );
+
+    reg.add(
         "CVX.SCALE",
         "QQQ$",
         "operand, scalar, name",

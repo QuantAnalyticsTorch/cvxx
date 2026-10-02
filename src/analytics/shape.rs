@@ -20,6 +20,7 @@ pub fn infer_shape(expr: &Expression) -> Result<(usize, usize), CvxError> {
         | Expression::Div(l, r) => broadcast_shape(infer_shape(l)?, infer_shape(r)?),
         Expression::Neg(e) => infer_shape(e),
         Expression::Scale { expr, .. } => infer_shape(expr),
+        Expression::Sum(_) => Ok((1, 1)),
     }
 }
 
@@ -79,6 +80,7 @@ pub fn render_expression(expr: &Expression, registry: &Registry) -> String {
         Expression::Scale { scalar, expr } => {
             format!("{scalar} * ({})", render_expression(expr, registry))
         }
+        Expression::Sum(e) => format!("sum({})", render_expression(e, registry)),
     }
 }
 
@@ -151,6 +153,18 @@ mod tests {
     }
 
     #[test]
+    fn sum_always_infers_a_scalar_shape() {
+        assert_eq!(
+            infer_shape(&Expression::sum(var(1, (3, 1)))).unwrap(),
+            (1, 1)
+        );
+        assert_eq!(
+            infer_shape(&Expression::sum(Expression::constant(1.0))).unwrap(),
+            (1, 1)
+        );
+    }
+
+    #[test]
     fn renders_each_node_kind() {
         let registry = Registry::new();
         assert_eq!(
@@ -175,6 +189,10 @@ mod tests {
                 &registry
             ),
             "2 * (3)"
+        );
+        assert_eq!(
+            render_expression(&Expression::sum(var(3, (3, 1))), &registry),
+            "sum(var#3)"
         );
     }
 
