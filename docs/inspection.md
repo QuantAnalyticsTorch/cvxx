@@ -63,7 +63,10 @@ Returns:
   unnamed variable as `var#7`. A `CVX.INDEX`/`index(...)`-built expression
   is shown as `<operand>[row, col]` for a single entry, or
   `<operand>[r1:r2, c1:c2]` for a row, column, or general sub-section —
-  for example, `"v"[2, 1]` or `"M"[1:2, 1:3]`.
+  for example, `"v"[2, 1]` or `"M"[1:2, 1:3]`. A `CVX.MATMUL`/`@`-built
+  expression is shown as `(<left>) @ (<right>)`, and a `CVX.TRANSPOSE`/
+  `.T`-built expression as `(<operand>).T` — for example,
+  `"weights" @ "x"` renders as `("weights") @ ("x")`.
 - `CVX.SHAPE`: `"<rows>x<cols>"`, only for parameters, variables, and
   expressions (an expression's shape is inferred from its structure).
 - `CVX.TYPE`: one of `"parameter"`, `"variable"`, `"expression"`,
@@ -78,9 +81,9 @@ Returns:
 - `CVX.SHAPE` on a constraint, constraint set, objective, problem, or
   result → `#VALUE!` (those object kinds have no shape).
 - `CVX.SHAPE` on an expression whose shape cannot be inferred (a genuine
-  shape mismatch between non-scalar operands, or a `CVX.INDEX`/
-  `index(...)` selection that extends beyond its operand's actual shape)
-  → `#VALUE!`.
+  shape mismatch between non-scalar operands, an incompatible
+  `CVX.MATMUL`/`@` pair, or a `CVX.INDEX`/`index(...)` selection that
+  extends beyond its operand's actual shape) → `#VALUE!`.
 - `CVX.DESCRIBE` never fails for a handle that resolves to *some* registry
   object — it degrades gracefully even if an expression's shape can't be
   inferred, showing `"(shape unavailable: ...)"` instead of failing.

@@ -5,8 +5,9 @@
 //! ```text
 //! expr     := add_sub
 //! add_sub  := mul_div (('+' | '-') mul_div)*
-//! mul_div  := unary (('*' | '/') unary)*
-//! unary    := '-' unary | primary
+//! mul_div  := unary (('*' | '/' | '@') unary)*
+//! unary    := '-' unary | postfix
+//! postfix  := primary ('.T')*
 //! primary  := number | call | identifier | '(' expr ')'
 //! call     := identifier '(' (expr (',' expr)*)? ')'
 //! number   := decimal integer or float, optional leading '-'
@@ -16,6 +17,12 @@
 //!
 //! `call` is a generic function-call-syntax node (`Expr::Call`); only the
 //! `sum`/`index` names are recognized at resolve time (SPEC-0015).
+//!
+//! `@` is matrix multiplication (`Expr::MatMul`), at the same precedence
+//! tier and associativity as `*`/`/`. `.T` is postfix transpose
+//! (`Expr::Transpose`), binding tighter than unary `-` and every binary
+//! operator, applying only to the immediately preceding `primary`
+//! (SPEC-0018) — matching Python/NumPy's own `@`/`.T` precedence exactly.
 
 use crate::analytics::ast::{Constraint, Expr, ExprNode, Relation};
 use crate::core::error::CvxError;
@@ -51,12 +58,39 @@ enum Token {
     Minus,
     Star,
     Slash,
+    /// `@`, matrix multiplication (SPEC-0018).
+    At,
+    /// `.T`, postfix transpose (SPEC-0018). Lexed as a single token (not
+    /// `Dot` + `Identifier("T")`) so the parser never needs to reason
+    /// about a general attribute-access grammar.
+    Transpose,
     LParen,
     RParen,
     Comma,
     Le,
     Ge,
     EqEq,
+}
+
+/// `true` when the two characters at `chars[i..]` are exactly `.T` and are
+/// not themselves followed by another identifier-continuation character
+/// (alphanumeric or `_`) — i.e. `.T` is a *maximal-munch* suffix, not the
+/// start of a longer dotted segment like `.Total` (SPEC-0018). A `.`
+/// immediately following is disambiguated by recursing one segment ahead:
+/// it continues the identifier (e.g. `"a.T.b"`, where the next segment
+/// isn't itself a `.T`) unless that following `.` begins its own
+/// `is_transpose_suffix` match (e.g. chained `"A.T.T"`, where the second
+/// `.T` is a separate token, not a continuation of the first).
+fn is_transpose_suffix(chars: &[char], i: usize) -> bool {
+    if chars.get(i) != Some(&'.') || chars.get(i + 1) != Some(&'T') {
+        return false;
+    }
+    match chars.get(i + 2) {
+        None => true,
+        Some(c) if c.is_alphanumeric() || *c == '_' => false,
+        Some('.') => is_transpose_suffix(chars, i + 2),
+        Some(_) => true,
+    }
 }
 
 fn tokenize(input: &str) -> Result<Vec<Token>, CvxError> {
@@ -80,6 +114,14 @@ fn tokenize(input: &str) -> Result<Vec<Token>, CvxError> {
             '-' => {
                 tokens.push(Token::Minus);
                 i += 1;
+            }
+            '@' => {
+                tokens.push(Token::At);
+                i += 1;
+            }
+            '.' if is_transpose_suffix(&chars, i) => {
+                tokens.push(Token::Transpose);
+                i += 2;
             }
             '*' => {
                 tokens.push(Token::Star);
@@ -139,6 +181,9 @@ fn tokenize(input: &str) -> Result<Vec<Token>, CvxError> {
                 i += 1;
                 while i < chars.len() {
                     let ch = chars[i];
+                    if ch == '.' && is_transpose_suffix(&chars, i) {
+                        break;
+                    }
                     if ch.is_alphanumeric() || ch == '_' || ch == '.' {
                         i += 1;
                     } else {
@@ -249,6 +294,11 @@ impl<'a> Parser<'a> {
                     let right = self.parse_unary()?;
                     left = Expr::Div(left, right).node();
                 }
+                Token::At => {
+                    self.advance();
+                    let right = self.parse_unary()?;
+                    left = Expr::MatMul(left, right).node();
+                }
                 _ => break,
             }
         }
@@ -262,8 +312,19 @@ impl<'a> Parser<'a> {
                 let operand = self.parse_unary()?;
                 Ok(Expr::Neg(operand).node())
             }
-            _ => self.parse_primary(),
+            _ => self.parse_postfix(),
         }
+    }
+
+    /// Parses one `primary` followed by zero or more postfix `.T` tokens
+    /// (SPEC-0018).
+    fn parse_postfix(&mut self) -> Result<ExprNode, CvxError> {
+        let mut expr = self.parse_primary()?;
+        while matches!(self.peek(), Some(Token::Transpose)) {
+            self.advance();
+            expr = Expr::Transpose(expr).node();
+        }
+        Ok(expr)
     }
 
     fn parse_primary(&mut self) -> Result<ExprNode, CvxError> {
@@ -562,5 +623,115 @@ mod tests {
     #[test]
     fn rejects_call_with_missing_comma() {
         assert!(parse("index(v 1 1)").is_err());
+    }
+
+    // --- `@`/`.T` grammar tests (SPEC-0018) ---
+
+    #[test]
+    fn parses_matmul_operator() {
+        let expr = parse("A @ B").unwrap();
+        assert_eq!(expr, Expr::MatMul(ident("A"), ident("B")).node());
+    }
+
+    #[test]
+    fn parses_transpose_postfix() {
+        let expr = parse("A.T").unwrap();
+        assert_eq!(expr, Expr::Transpose(ident("A")).node());
+    }
+
+    #[test]
+    fn matmul_is_same_precedence_tier_as_mul_and_div_left_associative() {
+        let expr = parse("A @ B * C").unwrap();
+        assert_eq!(
+            expr,
+            Expr::Mul(Expr::MatMul(ident("A"), ident("B")).node(), ident("C")).node()
+        );
+
+        let expr = parse("A * B @ C").unwrap();
+        assert_eq!(
+            expr,
+            Expr::MatMul(Expr::Mul(ident("A"), ident("B")).node(), ident("C")).node()
+        );
+    }
+
+    #[test]
+    fn transpose_binds_tighter_than_unary_minus() {
+        let expr = parse("-A.T").unwrap();
+        assert_eq!(expr, Expr::Neg(Expr::Transpose(ident("A")).node()).node());
+    }
+
+    #[test]
+    fn transpose_applies_to_a_parenthesized_expression_and_a_call() {
+        let expr = parse("(A + B).T").unwrap();
+        assert_eq!(
+            expr,
+            Expr::Transpose(Expr::Add(ident("A"), ident("B")).node()).node()
+        );
+
+        let expr = parse("sum(X).T").unwrap();
+        assert_eq!(
+            expr,
+            Expr::Transpose(
+                Expr::Call {
+                    name: "sum".to_string(),
+                    args: vec![ident("X")],
+                }
+                .node()
+            )
+            .node()
+        );
+    }
+
+    #[test]
+    fn transpose_chains_arbitrarily() {
+        let expr = parse("A.T.T").unwrap();
+        assert_eq!(
+            expr,
+            Expr::Transpose(Expr::Transpose(ident("A")).node()).node()
+        );
+    }
+
+    #[test]
+    fn an_ordinary_dotted_identifier_not_ending_in_dot_t_is_unaffected() {
+        let expr = parse("my.variable").unwrap();
+        assert_eq!(expr, ident("my.variable"));
+    }
+
+    #[test]
+    fn a_dotted_identifier_containing_dot_t_in_the_middle_is_unaffected() {
+        let expr = parse("a.T.b").unwrap();
+        assert_eq!(expr, ident("a.T.b"));
+    }
+
+    #[test]
+    fn an_identifier_literally_ending_in_dot_t_now_splits_into_transpose() {
+        // The documented, narrow edge case (SPEC-0018 Error Handling): a
+        // name whose entire text ends in literal `.T` (e.g. `cost.T`) is
+        // no longer referenceable by that full text inside this grammar.
+        let expr = parse("cost.T").unwrap();
+        assert_eq!(expr, Expr::Transpose(ident("cost")).node());
+    }
+
+    #[test]
+    fn nested_matmul_and_transpose_combination_parses_correctly() {
+        let expr = parse("sum(w.T @ Sigma @ w)").unwrap();
+        assert_eq!(
+            expr,
+            Expr::Call {
+                name: "sum".to_string(),
+                args: vec![Expr::MatMul(
+                    Expr::MatMul(Expr::Transpose(ident("w")).node(), ident("Sigma")).node(),
+                    ident("w"),
+                )
+                .node()],
+            }
+            .node()
+        );
+    }
+
+    #[test]
+    fn trailing_at_or_dot_t_with_no_operand_is_a_parse_error() {
+        assert!(parse("A @").is_err());
+        assert!(parse(".T").is_err());
     }
 }

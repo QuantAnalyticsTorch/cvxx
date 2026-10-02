@@ -101,6 +101,15 @@ impl<'a> Resolver<'a> {
                 let expr = self.resolve(operand)?;
                 Ok(Expression::neg(expr))
             }
+            Expr::MatMul(left, right) => {
+                let l = self.resolve(left)?;
+                let r = self.resolve(right)?;
+                Ok(Expression::matmul(l, r))
+            }
+            Expr::Transpose(operand) => {
+                let expr = self.resolve(operand)?;
+                Ok(Expression::transpose(expr))
+            }
             Expr::Call { name, args } => self.resolve_call(name, args),
         }
     }
@@ -521,6 +530,100 @@ mod tests {
         assert_eq!(
             resolve_expr(&registry, &ast).unwrap_err(),
             CvxError::UnknownIdentifier("missing_name".to_string())
+        );
+    }
+
+    // --- `@`/`.T` grammar resolution tests (SPEC-0018) ---
+
+    #[test]
+    fn resolves_matmul_operator_to_the_same_expression_as_the_functional_builder() {
+        let registry = Registry::new();
+        registry
+            .insert_parameter(Some("W".to_string()), (1, 3), vec![1.0, 2.0, 3.0])
+            .unwrap();
+        registry
+            .insert_variable(Some("x".to_string()), (3, 1))
+            .unwrap();
+        let param_uuid = registry.get_parameter_by_name("W").unwrap().uuid;
+        let variable = registry.get_variable_by_name("x").unwrap().variable;
+
+        let ast = parse("W @ x").unwrap();
+        let resolved = resolve_expr(&registry, &ast).unwrap();
+
+        assert_eq!(
+            resolved.expression,
+            Expression::matmul(
+                Expression::from_parameter(parameter_id(param_uuid), (1, 3), vec![1.0, 2.0, 3.0]),
+                Expression::from_variable(variable)
+            )
+        );
+        let mut deps = resolved.dependencies;
+        deps.sort();
+        assert_eq!(deps, vec!["W".to_string(), "x".to_string()]);
+    }
+
+    #[test]
+    fn resolves_transpose_postfix_to_the_same_expression_as_the_functional_builder() {
+        let registry = Registry::new();
+        registry
+            .insert_variable(Some("x".to_string()), (3, 1))
+            .unwrap();
+        let variable = registry.get_variable_by_name("x").unwrap().variable;
+
+        let ast = parse("x.T").unwrap();
+        let resolved = resolve_expr(&registry, &ast).unwrap();
+
+        assert_eq!(
+            resolved.expression,
+            Expression::transpose(Expression::from_variable(variable))
+        );
+        assert_eq!(resolved.dependencies, vec!["x".to_string()]);
+    }
+
+    #[test]
+    fn resolves_nested_matmul_and_transpose_combination_and_tracks_every_dependency() {
+        let registry = Registry::new();
+        registry
+            .insert_variable(Some("w".to_string()), (2, 1))
+            .unwrap();
+        registry
+            .insert_parameter(Some("Sigma".to_string()), (2, 2), vec![1.0, 0.0, 0.0, 1.0])
+            .unwrap();
+        let w = registry.get_variable_by_name("w").unwrap().variable;
+        let sigma_uuid = registry.get_parameter_by_name("Sigma").unwrap().uuid;
+
+        let ast = parse("w.T @ Sigma @ w").unwrap();
+        let resolved = resolve_expr(&registry, &ast).unwrap();
+
+        assert_eq!(
+            resolved.expression,
+            Expression::matmul(
+                Expression::matmul(
+                    Expression::transpose(Expression::from_variable(w)),
+                    Expression::from_parameter(
+                        parameter_id(sigma_uuid),
+                        (2, 2),
+                        vec![1.0, 0.0, 0.0, 1.0]
+                    )
+                ),
+                Expression::from_variable(w)
+            )
+        );
+        let mut deps = resolved.dependencies;
+        deps.sort();
+        assert_eq!(deps, vec!["Sigma".to_string(), "w".to_string()]);
+    }
+
+    #[test]
+    fn rejects_unresolvable_identifier_nested_inside_matmul_or_transpose() {
+        let registry = Registry::new();
+        assert_eq!(
+            resolve_expr(&registry, &parse("missing @ 1").unwrap()).unwrap_err(),
+            CvxError::UnknownIdentifier("missing".to_string())
+        );
+        assert_eq!(
+            resolve_expr(&registry, &parse("missing.T").unwrap()).unwrap_err(),
+            CvxError::UnknownIdentifier("missing".to_string())
         );
     }
 }

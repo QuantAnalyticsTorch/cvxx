@@ -127,6 +127,25 @@ pub extern "system" fn cvx_index(
     to_xloper_result(result, "CVX.INDEX")
 }
 
+/// `CVX.MATMUL(left, right, [name])` — standard (2-D) matrix
+/// multiplication of two existing expressions (SPEC-0018).
+#[export_name = "CVX.MATMUL"]
+pub extern "system" fn cvx_matmul(
+    left: LPXLOPER12,
+    right: LPXLOPER12,
+    name: LPXLOPER12,
+) -> LPXLOPER12 {
+    run_binary(left, right, name, Expression::matmul, "CVX.MATMUL")
+}
+
+/// `CVX.TRANSPOSE(operand, [name])` — the row/column transpose of an
+/// existing expression (SPEC-0018).
+#[export_name = "CVX.TRANSPOSE"]
+pub extern "system" fn cvx_transpose(operand: LPXLOPER12, name: LPXLOPER12) -> LPXLOPER12 {
+    let result = run_unary(operand, name, Expression::transpose);
+    to_xloper_result(result, "CVX.TRANSPOSE")
+}
+
 fn run_binary(
     left: LPXLOPER12,
     right: LPXLOPER12,
@@ -438,6 +457,169 @@ mod tests {
             1,
             1,
             Some("index_name_ambiguous_with_variable".to_string()),
+        )
+        .unwrap_err();
+        assert!(matches!(err, CvxError::AmbiguousIdentifier(_)));
+    }
+
+    // --- CVX.MATMUL/CVX.TRANSPOSE tests (SPEC-0018) ---
+
+    /// `run_binary`/`run_unary` themselves take `LPXLOPER12` and can't be
+    /// driven directly in a unit test (same reason as `run_index_for_test`
+    /// above); these mirror their bodies exactly, minus the
+    /// `Variant`/`LPXLOPER12` parsing.
+    fn run_matmul_for_test(
+        left: Expression,
+        right: Expression,
+        name: Option<String>,
+    ) -> Result<String, CvxError> {
+        let expr = Expression::matmul(left, right);
+        Registry::global().insert_expression(name, expr, vec![])
+    }
+
+    fn run_transpose_for_test(
+        operand: Expression,
+        name: Option<String>,
+    ) -> Result<String, CvxError> {
+        let expr = Expression::transpose(operand);
+        Registry::global().insert_expression(name, expr, vec![])
+    }
+
+    #[test]
+    fn cvx_matmul_constructs_the_expected_expression_for_parameter_and_variable_operands() {
+        let param_handle = Registry::global()
+            .insert_parameter(None, (1, 3), vec![1.0, 2.0, 3.0])
+            .unwrap();
+        let var_handle = Registry::global().insert_variable(None, (3, 1)).unwrap();
+        let left = resolve_handle_for_test(&param_handle).unwrap();
+        let right = resolve_handle_for_test(&var_handle).unwrap();
+
+        let handle = run_matmul_for_test(left.clone(), right.clone(), None).unwrap();
+        let (_, uuid) = parse_handle(&handle).unwrap();
+        let entry = Registry::global().get_expression_by_uuid(uuid).unwrap();
+        assert_eq!(entry.expression, Expression::matmul(left, right));
+    }
+
+    #[test]
+    fn cvx_matmul_constructs_the_expected_expression_for_expression_operands() {
+        let var_handle = Registry::global().insert_variable(None, (2, 2)).unwrap();
+        let operand = resolve_handle_for_test(&var_handle).unwrap();
+        let left_handle = run_transpose_for_test(operand.clone(), None).unwrap();
+        let left = resolve_handle_for_test(&left_handle).unwrap();
+
+        let handle = run_matmul_for_test(left.clone(), operand.clone(), None).unwrap();
+        let (_, uuid) = parse_handle(&handle).unwrap();
+        let entry = Registry::global().get_expression_by_uuid(uuid).unwrap();
+        assert_eq!(entry.expression, Expression::matmul(left, operand));
+    }
+
+    #[test]
+    fn cvx_matmul_does_not_error_at_call_time_even_for_already_incompatible_shapes() {
+        // Lazy shape validation (Non-Objective, SPEC-0018): the handle is
+        // built unconditionally; the mismatch only surfaces later via
+        // `infer_shape`/a solve.
+        let a_handle = Registry::global().insert_variable(None, (2, 3)).unwrap();
+        let b_handle = Registry::global().insert_variable(None, (2, 2)).unwrap();
+        let a = resolve_handle_for_test(&a_handle).unwrap();
+        let b = resolve_handle_for_test(&b_handle).unwrap();
+
+        let handle = run_matmul_for_test(a, b, None).unwrap();
+        let (_, uuid) = parse_handle(&handle).unwrap();
+        let entry = Registry::global().get_expression_by_uuid(uuid).unwrap();
+
+        let err = crate::analytics::shape::infer_shape(&entry.expression).unwrap_err();
+        assert!(matches!(err, CvxError::InvalidExpression(_)));
+    }
+
+    #[test]
+    fn cvx_matmul_reusing_a_name_overwrites_the_previous_entry() {
+        let var_handle = Registry::global().insert_variable(None, (1, 3)).unwrap();
+        let operand = resolve_handle_for_test(&var_handle).unwrap();
+        run_matmul_for_test(
+            operand.clone(),
+            Expression::constant(1.0),
+            Some("reused_matmul_name".to_string()),
+        )
+        .unwrap();
+        run_matmul_for_test(
+            operand.clone(),
+            Expression::constant(2.0),
+            Some("reused_matmul_name".to_string()),
+        )
+        .unwrap();
+        let entry = Registry::global()
+            .get_expression_by_name("reused_matmul_name")
+            .unwrap();
+        assert_eq!(
+            entry.expression,
+            Expression::matmul(operand, Expression::constant(2.0))
+        );
+    }
+
+    #[test]
+    fn cvx_matmul_name_already_used_by_a_different_object_table_errors() {
+        let var_handle = Registry::global()
+            .insert_variable(
+                Some("matmul_name_ambiguous_with_variable".to_string()),
+                (1, 1),
+            )
+            .unwrap();
+        let operand = resolve_handle_for_test(&var_handle).unwrap();
+        let err = run_matmul_for_test(
+            operand.clone(),
+            Expression::constant(1.0),
+            Some("matmul_name_ambiguous_with_variable".to_string()),
+        )
+        .unwrap_err();
+        assert!(matches!(err, CvxError::AmbiguousIdentifier(_)));
+    }
+
+    #[test]
+    fn cvx_transpose_constructs_the_expected_expression() {
+        let var_handle = Registry::global().insert_variable(None, (2, 3)).unwrap();
+        let operand = resolve_handle_for_test(&var_handle).unwrap();
+        let handle = run_transpose_for_test(operand.clone(), None).unwrap();
+        let (_, uuid) = parse_handle(&handle).unwrap();
+        let entry = Registry::global().get_expression_by_uuid(uuid).unwrap();
+        assert_eq!(entry.expression, Expression::transpose(operand));
+    }
+
+    #[test]
+    fn cvx_transpose_of_a_transpose_nests_correctly() {
+        let var_handle = Registry::global().insert_variable(None, (2, 3)).unwrap();
+        let operand = resolve_handle_for_test(&var_handle).unwrap();
+        let inner_handle = run_transpose_for_test(operand, None).unwrap();
+        let inner = resolve_handle_for_test(&inner_handle).unwrap();
+        let outer_handle = run_transpose_for_test(inner.clone(), None).unwrap();
+        let (_, uuid) = parse_handle(&outer_handle).unwrap();
+        let entry = Registry::global().get_expression_by_uuid(uuid).unwrap();
+        assert_eq!(entry.expression, Expression::transpose(inner));
+    }
+
+    #[test]
+    fn cvx_transpose_reusing_a_name_overwrites_the_previous_entry() {
+        let var_handle = Registry::global().insert_variable(None, (1, 3)).unwrap();
+        let operand = resolve_handle_for_test(&var_handle).unwrap();
+        run_transpose_for_test(operand.clone(), Some("reused_transpose_name".to_string())).unwrap();
+        run_transpose_for_test(operand.clone(), Some("reused_transpose_name".to_string())).unwrap();
+        let entry = Registry::global()
+            .get_expression_by_name("reused_transpose_name")
+            .unwrap();
+        assert_eq!(entry.expression, Expression::transpose(operand));
+    }
+
+    #[test]
+    fn cvx_transpose_name_already_used_by_a_different_object_table_errors() {
+        let var_handle = Registry::global()
+            .insert_variable(
+                Some("transpose_name_ambiguous_with_variable".to_string()),
+                (1, 1),
+            )
+            .unwrap();
+        let operand = resolve_handle_for_test(&var_handle).unwrap();
+        let err = run_transpose_for_test(
+            operand,
+            Some("transpose_name_ambiguous_with_variable".to_string()),
         )
         .unwrap_err();
         assert!(matches!(err, CvxError::AmbiguousIdentifier(_)));

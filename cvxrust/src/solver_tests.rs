@@ -763,3 +763,146 @@ fn index_constraint_restricts_only_a_sub_block_of_a_matrix_variable() {
     assert!((values[2] - 3.0).abs() < 1e-4);
     assert!((values[3] - 4.0).abs() < 1e-4);
 }
+
+// --- MatMul/Transpose end-to-end tests (SPEC-0018) ---
+
+#[test]
+fn budget_allocation_lp_with_matmul_solves_the_least_cost_allocation() {
+    // minimize cost @ x subject to x >= [0,0,0] and ones @ x >= 10, with
+    // cost = [3, 1, 2] (a (1, 3) row) -> all budget should go to the
+    // cheapest entry (index 1, cost 1), giving x = [0, 10, 0] and
+    // objective 10 — the same scenario as
+    // `budget_allocation_lp_with_sum_solves_the_least_cost_allocation`,
+    // but expressed as true matrix multiplication (a known weights table
+    // applied to an unknown variable column) instead of `Mul` + `Sum`.
+    let x = Variable::new(1, (3, 1));
+    let x_expr = Expression::from_variable(x);
+    let cost = Expression::from_parameter(2, (1, 3), vec![3.0, 1.0, 2.0]);
+    let ones = Expression::from_parameter(3, (1, 3), vec![1.0, 1.0, 1.0]);
+    let zero = Expression::from_parameter(4, (3, 1), vec![0.0, 0.0, 0.0]);
+    let problem = Problem {
+        sense: Sense::Minimize,
+        objective: Expression::matmul(cost, x_expr.clone()),
+        constraints: vec![
+            Constraint {
+                relation: Relation::GreaterEqual,
+                lhs: x_expr.clone(),
+                rhs: zero,
+            },
+            Constraint {
+                relation: Relation::GreaterEqual,
+                lhs: Expression::matmul(ones, x_expr),
+                rhs: Expression::constant(10.0),
+            },
+        ],
+        variables: vec![x],
+    };
+    let solution = solve(&problem);
+    assert_eq!(solution.status, SolveStatus::Optimal);
+    assert!((solution.objective_value.unwrap() - 10.0).abs() < 1e-4);
+    assert!((solution.variable_values[0][1] - 10.0).abs() < 1e-4);
+}
+
+#[test]
+fn transpose_lines_up_two_row_shaped_operands_for_a_matmul_dot_product() {
+    // Both `weights` and `x` are (1, 3) rows — incompatible for `MatMul`
+    // directly (3 != 1) — so `x.T` (a (3, 1) column) is required to line
+    // them up: `weights @ x.T` is the dot product `3*x0 + 1*x1 + 2*x2`.
+    // minimize that subject to x >= [0,0,0] and ones @ x.T >= 10, same
+    // optimum as the column-variable version above, confirming `Transpose`
+    // composes correctly with `MatMul` end-to-end.
+    let x = Variable::new(1, (1, 3));
+    let x_expr = Expression::from_variable(x);
+    let weights = Expression::from_parameter(2, (1, 3), vec![3.0, 1.0, 2.0]);
+    let ones = Expression::from_parameter(3, (1, 3), vec![1.0, 1.0, 1.0]);
+    let zero = Expression::from_parameter(4, (1, 3), vec![0.0, 0.0, 0.0]);
+    let problem = Problem {
+        sense: Sense::Minimize,
+        objective: Expression::matmul(weights, Expression::transpose(x_expr.clone())),
+        constraints: vec![
+            Constraint {
+                relation: Relation::GreaterEqual,
+                lhs: x_expr.clone(),
+                rhs: zero,
+            },
+            Constraint {
+                relation: Relation::GreaterEqual,
+                lhs: Expression::matmul(ones, Expression::transpose(x_expr)),
+                rhs: Expression::constant(10.0),
+            },
+        ],
+        variables: vec![x],
+    };
+    let solution = solve(&problem);
+    assert_eq!(solution.status, SolveStatus::Optimal);
+    assert!((solution.objective_value.unwrap() - 10.0).abs() < 1e-4);
+    assert!((solution.variable_values[0][1] - 10.0).abs() < 1e-4);
+}
+
+#[test]
+fn matmul_constraint_restricts_only_the_selected_combination_of_a_larger_variable() {
+    // A (2, 3) selection matrix picks out x's first two entries via
+    // matrix multiplication (M @ x == [3, 4]); x's third entry is left
+    // otherwise free and is driven to its own lower bound (0) by the
+    // objective — the `MatMul` analogue of
+    // `index_constraint_restricts_only_the_indexed_entry_of_a_larger_variable`
+    // (SPEC-0015), confirming a known table applied to part of an unknown
+    // list restricts only the combinations it names.
+    let x = Variable::new(1, (3, 1));
+    let x_expr = Expression::from_variable(x);
+    let zero = Expression::from_parameter(2, (3, 1), vec![0.0, 0.0, 0.0]);
+    let selection = Expression::from_parameter(3, (2, 3), vec![1.0, 0.0, 0.0, 0.0, 1.0, 0.0]);
+    let bound = Expression::from_parameter(4, (2, 1), vec![3.0, 4.0]);
+    let problem = Problem {
+        sense: Sense::Minimize,
+        objective: Expression::sum(x_expr.clone()),
+        constraints: vec![
+            Constraint {
+                relation: Relation::GreaterEqual,
+                lhs: x_expr.clone(),
+                rhs: zero,
+            },
+            Constraint {
+                relation: Relation::Equal,
+                lhs: Expression::matmul(selection, x_expr),
+                rhs: bound,
+            },
+        ],
+        variables: vec![x],
+    };
+    let solution = solve(&problem);
+    assert_eq!(solution.status, SolveStatus::Optimal);
+    assert!((solution.objective_value.unwrap() - 7.0).abs() < 1e-4);
+    let values = &solution.variable_values[0];
+    assert!((values[0] - 3.0).abs() < 1e-4);
+    assert!((values[1] - 4.0).abs() < 1e-4);
+    assert!((values[2] - 0.0).abs() < 1e-4);
+}
+
+#[test]
+fn matmul_chained_so_the_variable_appears_on_both_final_sides_is_rejected() {
+    // (w.T @ Sigma) @ w, a combined-risk-style quadratic form over a
+    // variable-dependent matrix/vector `w`: the first `MatMul` (variable
+    // @ constant) is fine, but the second multiplies the resulting
+    // variable-dependent row against `w` itself — two variable-dependent
+    // operands, out of scope for this specification (deferred to
+    // ISSUE-0016, same as a bare `Mul` of two variable-dependent terms).
+    let w = Variable::new(1, (2, 1));
+    let w_expr = Expression::from_variable(w);
+    let sigma = Expression::from_parameter(2, (2, 2), vec![1.0, 0.0, 0.0, 1.0]);
+    let risk = Expression::matmul(
+        Expression::matmul(Expression::transpose(w_expr.clone()), sigma),
+        w_expr,
+    );
+    let problem = Problem {
+        sense: Sense::Minimize,
+        objective: risk,
+        constraints: Vec::new(),
+        variables: vec![w],
+    };
+    let solution = solve(&problem);
+    match solution.status {
+        SolveStatus::Error(_) => {}
+        other => panic!("expected an Error status, got {other:?}"),
+    }
+}

@@ -573,3 +573,223 @@ fn mul_of_two_index_derived_scalars_is_rejected() {
     let err = reduce_expression(&expr, &offsets, n_total).unwrap_err();
     assert_eq!(err, VECTOR_MUL_ERROR);
 }
+
+// --- MatMul/Transpose tests (SPEC-0018) ---
+
+#[test]
+fn matmul_and_transpose_construct_the_expected_variants() {
+    let a = Expression::constant(1.0);
+    let b = Expression::constant(2.0);
+    assert_eq!(
+        Expression::matmul(a.clone(), b.clone()),
+        Expression::MatMul(Box::new(a.clone()), Box::new(b.clone()))
+    );
+    assert_eq!(
+        Expression::transpose(a.clone()),
+        Expression::Transpose(Box::new(a))
+    );
+}
+
+#[test]
+fn transpose_entries_permutes_row_to_column_and_back() {
+    let w = Variable::new(1, (1, 3));
+    let (offsets, n_total) = offsets_of(&[w]);
+    let row_form = linearize_shaped(&Expression::from_variable(w), &offsets, n_total).unwrap();
+    let column = transpose_entries(&row_form);
+    assert_eq!(column.shape, (3, 1));
+    assert_eq!(
+        column
+            .entries
+            .iter()
+            .map(|e| e.linear.clone())
+            .collect::<Vec<_>>(),
+        row_form
+            .entries
+            .iter()
+            .map(|e| e.linear.clone())
+            .collect::<Vec<_>>()
+    );
+
+    let back = transpose_entries(&column);
+    assert_eq!(back.shape, (1, 3));
+}
+
+#[test]
+fn transpose_entries_permutes_a_general_non_square_matrix() {
+    // 2x3 matrix, row-major entries 0..=5 as constants; transposing gives
+    // the 3x2 matrix with entries read column-major from the original.
+    let param = Expression::from_parameter(1, (2, 3), vec![0.0, 1.0, 2.0, 3.0, 4.0, 5.0]);
+    let form = linearize_shaped(&param, &HashMap::new(), 0).unwrap();
+    let transposed = transpose_entries(&form);
+    assert_eq!(transposed.shape, (3, 2));
+    assert_eq!(
+        transposed
+            .entries
+            .iter()
+            .map(|e| e.constant)
+            .collect::<Vec<_>>(),
+        vec![0.0, 3.0, 1.0, 4.0, 2.0, 5.0]
+    );
+}
+
+#[test]
+fn transpose_of_a_1x1_operand_is_a_no_op() {
+    let form = linearize_shaped(&Expression::constant(7.0), &HashMap::new(), 0).unwrap();
+    let transposed = transpose_entries(&form);
+    assert_eq!(transposed.shape, (1, 1));
+    assert_eq!(transposed.entries[0].constant, 7.0);
+}
+
+#[test]
+fn matmul_of_row_parameter_and_column_variable_is_a_dot_product() {
+    // (1, 3) weights times (3, 1) variable column -> (1, 1) scalar.
+    let x = Variable::new(1, (3, 1));
+    let (offsets, n_total) = offsets_of(&[x]);
+    let weights = Expression::from_parameter(2, (1, 3), vec![2.0, 3.0, 4.0]);
+    let expr = Expression::matmul(weights, Expression::from_variable(x));
+    let form = linearize_shaped(&expr, &offsets, n_total).unwrap();
+    assert_eq!(form.shape, (1, 1));
+    assert_eq!(form.entries[0].linear, vec![2.0, 3.0, 4.0]);
+}
+
+#[test]
+fn matmul_of_column_variable_and_row_parameter_is_an_outer_product() {
+    // (3, 1) variable column times (1, 3) weights row -> (3, 3) outer
+    // product: entry (i, j) is x_i scaled by weights[j].
+    let x = Variable::new(1, (3, 1));
+    let (offsets, n_total) = offsets_of(&[x]);
+    let weights = Expression::from_parameter(2, (1, 3), vec![5.0, 6.0, 7.0]);
+    let expr = Expression::matmul(Expression::from_variable(x), weights);
+    let form = linearize_shaped(&expr, &offsets, n_total).unwrap();
+    assert_eq!(form.shape, (3, 3));
+    // Row i (entries 3*i..3*i+3) is x_i * [5, 6, 7].
+    for i in 0..3 {
+        for j in 0..3 {
+            let entry = &form.entries[i * 3 + j];
+            let mut expected = vec![0.0; 3];
+            expected[i] = [5.0, 6.0, 7.0][j];
+            assert_eq!(entry.linear, expected);
+        }
+    }
+}
+
+#[test]
+fn matmul_of_a_general_constant_matrix_and_variable_column_is_the_expected_product() {
+    // [[1, 2], [3, 4]] @ [x0, x1] -> [x0 + 2*x1, 3*x0 + 4*x1].
+    let x = Variable::new(1, (2, 1));
+    let (offsets, n_total) = offsets_of(&[x]);
+    let matrix = Expression::from_parameter(2, (2, 2), vec![1.0, 2.0, 3.0, 4.0]);
+    let expr = Expression::matmul(matrix, Expression::from_variable(x));
+    let form = linearize_shaped(&expr, &offsets, n_total).unwrap();
+    assert_eq!(form.shape, (2, 1));
+    assert_eq!(form.entries[0].linear, vec![1.0, 2.0]);
+    assert_eq!(form.entries[1].linear, vec![3.0, 4.0]);
+}
+
+#[test]
+fn matmul_of_incompatible_shapes_is_a_descriptive_error_not_a_panic() {
+    let a = Expression::from_parameter(1, (2, 3), vec![0.0; 6]);
+    let b = Expression::from_parameter(2, (2, 2), vec![0.0; 4]);
+    let expr = Expression::matmul(a, b);
+    let err = linearize_shaped(&expr, &HashMap::new(), 0).unwrap_err();
+    assert_eq!(
+        err,
+        "matrix multiplication requires the left operand's column count \
+         to match the right operand's row count: 2x3 (columns=3) vs 2x2 \
+         (rows=2)"
+    );
+}
+
+#[test]
+fn matmul_of_two_variable_dependent_operands_is_rejected() {
+    let x = Variable::new(1, (3, 1));
+    let y = Variable::new(2, (1, 3));
+    let (offsets, n_total) = offsets_of(&[x, y]);
+    let expr = Expression::matmul(Expression::from_variable(y), Expression::from_variable(x));
+    let err = linearize_shaped(&expr, &offsets, n_total).unwrap_err();
+    assert_eq!(err, VECTOR_MUL_ERROR);
+}
+
+#[test]
+fn matmul_nested_inside_sum_reduces_correctly() {
+    // sum(weights @ x) for weights (1, 3) constant and x (3, 1) variable
+    // is the same scalar the bare matmul already produces (its own
+    // shape is already (1, 1), so summing it is a no-op).
+    let x = Variable::new(1, (3, 1));
+    let (offsets, n_total) = offsets_of(&[x]);
+    let weights = Expression::from_parameter(2, (1, 3), vec![2.0, 3.0, 4.0]);
+    let expr = Expression::sum(Expression::matmul(weights, Expression::from_variable(x)));
+    let form = reduce_expression(&expr, &offsets, n_total).unwrap();
+    assert_eq!(form.shape, (1, 1));
+    assert_eq!(form.entries[0].linear, vec![2.0, 3.0, 4.0]);
+}
+
+#[test]
+fn index_nested_inside_matmul_operand_reduces_correctly() {
+    // Select row 2 of a 2x3 constant matrix via Index, then matmul it
+    // against a (3, 1) variable column.
+    let x = Variable::new(1, (3, 1));
+    let (offsets, n_total) = offsets_of(&[x]);
+    let matrix = Expression::from_parameter(2, (2, 3), vec![1.0, 1.0, 1.0, 2.0, 3.0, 4.0]);
+    let row = Expression::index(matrix, 1, 0, 1, 3);
+    let expr = Expression::matmul(row, Expression::from_variable(x));
+    let form = reduce_expression(&expr, &offsets, n_total).unwrap();
+    assert_eq!(form.shape, (1, 1));
+    assert_eq!(form.entries[0].linear, vec![2.0, 3.0, 4.0]);
+}
+
+#[test]
+fn matmul_nested_inside_matmul_operand_reduces_correctly() {
+    // (weights @ M) @ x: chaining two matmuls, the first entirely
+    // constant, the second against a variable column.
+    let x = Variable::new(1, (2, 1));
+    let (offsets, n_total) = offsets_of(&[x]);
+    let weights = Expression::from_parameter(1, (1, 2), vec![1.0, 1.0]);
+    let m = Expression::from_parameter(2, (2, 2), vec![1.0, 2.0, 3.0, 4.0]);
+    let combined_weights = Expression::matmul(weights, m);
+    let expr = Expression::matmul(combined_weights, Expression::from_variable(x));
+    let form = reduce_expression(&expr, &offsets, n_total).unwrap();
+    assert_eq!(form.shape, (1, 1));
+    // combined_weights = [1,1] @ [[1,2],[3,4]] = [4, 6]
+    assert_eq!(form.entries[0].linear, vec![4.0, 6.0]);
+}
+
+#[test]
+fn is_all_scalar_false_for_any_expression_containing_matmul_even_when_all_1x1() {
+    let x = scalar_var(1);
+    let expr = Expression::matmul(Expression::from_variable(x), Expression::constant(2.0));
+    assert!(!is_all_scalar(&expr));
+}
+
+#[test]
+fn is_all_scalar_true_for_a_bare_transpose_of_an_otherwise_scalar_expression() {
+    let x = scalar_var(1);
+    let expr = Expression::transpose(Expression::from_variable(x));
+    assert!(is_all_scalar(&expr));
+}
+
+#[test]
+fn is_all_scalar_false_for_transpose_nested_inside_matmul() {
+    let x = scalar_var(1);
+    let expr = Expression::matmul(
+        Expression::transpose(Expression::from_variable(x)),
+        Expression::constant(2.0),
+    );
+    assert!(!is_all_scalar(&expr));
+}
+
+#[test]
+fn transpose_of_scalar_quadratic_preserves_quadratic_support() {
+    // Transpose(x * x) for a scalar x: is_all_scalar recurses through
+    // Transpose (SPEC-0018), so this is routed through the
+    // quadratic-capable quadratize, unlike Sum/Index/MatMul wrapping the
+    // same x * x term (which always force the affine-only path).
+    let x = scalar_var(1);
+    let (offsets, n_total) = offsets_of(&[x]);
+    let x_expr = Expression::from_variable(x);
+    let expr = Expression::transpose(Expression::mul(x_expr.clone(), x_expr));
+    assert!(is_all_scalar(&expr));
+    let form = reduce_expression(&expr, &offsets, n_total).unwrap();
+    assert_eq!(form.shape, (1, 1));
+    assert_eq!(form.entries[0].quad, vec![(0, 0, 1.0)]);
+}

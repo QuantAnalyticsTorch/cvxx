@@ -32,6 +32,11 @@ pub fn infer_shape(expr: &Expression) -> Result<(usize, usize), CvxError> {
             check_index_bounds(operand_shape, row_start + 1, col_start + 1, *rows, *cols)?;
             Ok((*rows, *cols))
         }
+        Expression::MatMul(l, r) => matmul_shape(infer_shape(l)?, infer_shape(r)?),
+        Expression::Transpose(e) => {
+            let (rows, cols) = infer_shape(e)?;
+            Ok((cols, rows))
+        }
     }
 }
 
@@ -71,6 +76,23 @@ pub fn check_index_bounds(
         )));
     }
     Ok(())
+}
+
+/// Validates the standard 2-D matrix-multiplication shape rule: `a`'s
+/// column count must equal `b`'s row count, producing shape `(a.0, b.1)`.
+/// Distinct from `broadcast_shape`'s elementwise rule (SPEC-0018) — a
+/// `(1, 1)` operand never broadcasts through this rule the way it does
+/// through `broadcast_shape`.
+pub fn matmul_shape(a: (usize, usize), b: (usize, usize)) -> Result<(usize, usize), CvxError> {
+    if a.1 != b.0 {
+        return Err(CvxError::InvalidExpression(format!(
+            "matrix multiplication requires the left operand's column \
+             count to match the right operand's row count: {}x{} \
+             (columns={}) vs {}x{} (rows={})",
+            a.0, a.1, a.1, b.0, b.1, b.0
+        )));
+    }
+    Ok((a.0, b.1))
 }
 
 /// Renders an `Expression` as a fully-parenthesized diagnostic string for
@@ -136,6 +158,12 @@ pub fn render_expression(expr: &Expression, registry: &Registry) -> String {
             };
             format!("{inner}[{row_part}, {col_part}]")
         }
+        Expression::MatMul(l, r) => format!(
+            "({}) @ ({})",
+            render_expression(l, registry),
+            render_expression(r, registry)
+        ),
+        Expression::Transpose(e) => format!("({}).T", render_expression(e, registry)),
     }
 }
 
@@ -384,5 +412,88 @@ mod tests {
             Expression::from_variable(variable),
         );
         assert_eq!(render_expression(&expr, &registry), "(\"x\") * (\"x\")");
+    }
+
+    // --- MatMul/Transpose tests (SPEC-0018) ---
+
+    #[test]
+    fn matmul_shape_accepts_compatible_shapes_including_dot_and_outer_products() {
+        assert_eq!(matmul_shape((2, 3), (3, 4)).unwrap(), (2, 4));
+        assert_eq!(matmul_shape((1, 3), (3, 1)).unwrap(), (1, 1));
+        assert_eq!(matmul_shape((3, 1), (1, 3)).unwrap(), (3, 3));
+    }
+
+    #[test]
+    fn matmul_shape_is_never_satisfied_by_a_1x1_operand_unlike_broadcast_shape() {
+        let err = matmul_shape((1, 1), (3, 2)).unwrap_err();
+        assert_eq!(
+            err,
+            CvxError::InvalidExpression(
+                "matrix multiplication requires the left operand's column \
+                 count to match the right operand's row count: 1x1 \
+                 (columns=1) vs 3x2 (rows=3)"
+                    .to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn matmul_shape_rejects_incompatible_shapes_with_a_descriptive_error() {
+        let err = matmul_shape((2, 3), (2, 2)).unwrap_err();
+        assert_eq!(
+            err,
+            CvxError::InvalidExpression(
+                "matrix multiplication requires the left operand's column \
+                 count to match the right operand's row count: 2x3 \
+                 (columns=3) vs 2x2 (rows=2)"
+                    .to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn infer_shape_propagates_matmul_shape_result_and_error() {
+        let expr = Expression::matmul(var(1, (2, 3)), var(2, (3, 4)));
+        assert_eq!(infer_shape(&expr).unwrap(), (2, 4));
+
+        let bad = Expression::matmul(var(1, (2, 3)), var(2, (2, 2)));
+        let err = infer_shape(&bad).unwrap_err();
+        assert_eq!(
+            err,
+            CvxError::InvalidExpression(
+                "matrix multiplication requires the left operand's column \
+                 count to match the right operand's row count: 2x3 \
+                 (columns=3) vs 2x2 (rows=2)"
+                    .to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn infer_shape_swaps_rows_and_cols_for_transpose() {
+        assert_eq!(
+            infer_shape(&Expression::transpose(var(1, (2, 3)))).unwrap(),
+            (3, 2)
+        );
+        assert_eq!(
+            infer_shape(&Expression::transpose(var(1, (1, 1)))).unwrap(),
+            (1, 1)
+        );
+    }
+
+    #[test]
+    fn renders_matmul_and_transpose() {
+        let registry = Registry::new();
+        assert_eq!(
+            render_expression(
+                &Expression::matmul(var(1, (1, 1)), var(2, (1, 1))),
+                &registry
+            ),
+            "(var#1) @ (var#2)"
+        );
+        assert_eq!(
+            render_expression(&Expression::transpose(var(1, (1, 1))), &registry),
+            "(var#1).T"
+        );
     }
 }

@@ -63,6 +63,16 @@ pub enum Expression {
         rows: usize,
         cols: usize,
     },
+    /// Standard (2-D) matrix multiplication of two (possibly
+    /// vector/matrix-shaped) expressions: `left` contributes `rows`, which
+    /// must match `right`'s row count against `left`'s column count (see
+    /// `cvxrust::reduce::matmul_shape`); the result has `left`'s row count
+    /// and `right`'s column count (SPEC-0018).
+    MatMul(Box<Expression>, Box<Expression>),
+    /// The row/column transpose of a (possibly vector/matrix-shaped)
+    /// expression: a `rows x cols` operand becomes `cols x rows`
+    /// (SPEC-0018).
+    Transpose(Box<Expression>),
 }
 
 impl Expression {
@@ -147,6 +157,16 @@ impl Expression {
             rows,
             cols,
         }
+    }
+
+    /// Creates a matrix-multiplication expression.
+    pub fn matmul(left: Expression, right: Expression) -> Self {
+        Expression::MatMul(Box::new(left), Box::new(right))
+    }
+
+    /// Creates a transpose expression.
+    pub fn transpose(expr: Expression) -> Self {
+        Expression::Transpose(Box::new(expr))
     }
 }
 

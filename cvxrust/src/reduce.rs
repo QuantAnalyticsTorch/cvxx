@@ -8,12 +8,13 @@
 //!   SPEC-0011), which supports quadratic (degree-2, "variable ×
 //!   variable") terms, but only when every `Variable`/`Parameter` leaf in
 //!   the expression has shape `(1, 1)` and the expression contains no
-//!   `Sum`/`Index` (SPEC-0015).
+//!   `Sum`/`Index`/`MatMul` (SPEC-0015/SPEC-0018; a bare `Transpose` does
+//!   not by itself force the other path — see `check_expr_shapes`).
 //! - `linearize_shaped` — the affine-only, shape-broadcasting reduction
 //!   (SPEC-0014) used otherwise, which supports vector/matrix-shaped
-//!   variables and parameters (`Sum`, and `Index` sub-block selection,
-//!   SPEC-0015), but rejects any product or quotient of two
-//!   variable-dependent operands.
+//!   variables and parameters (`Sum`, `Index` sub-block selection, and
+//!   `MatMul`/`Transpose`, SPEC-0015/SPEC-0018), but rejects any product
+//!   or quotient of two variable-dependent operands.
 //!
 //! [`crate::solver::solve`] calls only [`reduce_expression`]; it never
 //! calls `quadratize`/`linearize_shaped` directly.
@@ -179,6 +180,8 @@ fn check_expr_shapes(expr: &Expression) -> Result<(), String> {
         Expression::Scale { expr, .. } => check_expr_shapes(expr),
         Expression::Sum(_) => Err(SHAPE_ERROR.to_string()),
         Expression::Index { .. } => Err(SHAPE_ERROR.to_string()),
+        Expression::MatMul(..) => Err(SHAPE_ERROR.to_string()),
+        Expression::Transpose(e) => check_expr_shapes(e),
     }
 }
 
@@ -222,6 +225,25 @@ pub(crate) fn entry_at(form: &ShapedForm, k: usize) -> &QuadraticForm {
     } else {
         &form.entries[k]
     }
+}
+
+/// Validates the standard 2-D matrix-multiplication shape rule: `a`'s
+/// column count must equal `b`'s row count. Distinct from
+/// `broadcast_shape`'s elementwise rule (SPEC-0018) — a `(1, 1)` operand
+/// never broadcasts through this rule the way it does through
+/// `broadcast_shape`. Duplicated from `src/analytics/shape.rs::matmul_shape`
+/// (`cvxrust` does not depend on `cvxx`), same duplication rationale as
+/// `broadcast_shape` above.
+pub(crate) fn matmul_shape(a: (usize, usize), b: (usize, usize)) -> Result<(usize, usize), String> {
+    if a.1 != b.0 {
+        return Err(format!(
+            "matrix multiplication requires the left operand's column \
+             count to match the right operand's row count: {}x{} \
+             (columns={}) vs {}x{} (rows={})",
+            a.0, a.1, a.1, b.0, b.1, b.0
+        ));
+    }
+    Ok((a.0, b.1))
 }
 
 const VECTOR_MUL_ERROR: &str = "solver only supports linear (affine) \
@@ -371,7 +393,69 @@ fn linearize_shaped(
             let inner = linearize_shaped(expr, offsets, n_total)?;
             select_sub_block(&inner, *row_start, *col_start, *rows, *cols)
         }
+        Expression::Transpose(e) => {
+            let inner = linearize_shaped(e, offsets, n_total)?;
+            Ok(transpose_entries(&inner))
+        }
+        Expression::MatMul(l, r) => {
+            let lf = linearize_shaped(l, offsets, n_total)?;
+            let rf = linearize_shaped(r, offsets, n_total)?;
+            matmul_entries(&lf, &rf, n_total)
+        }
     }
+}
+
+/// Row-major transpose: a `rows x cols` form becomes `cols x rows`, entry
+/// `(r, c)` moving to `(c, r)` (SPEC-0018).
+fn transpose_entries(form: &ShapedForm) -> ShapedForm {
+    let (rows, cols) = form.shape;
+    let mut entries = Vec::with_capacity(rows * cols);
+    for c in 0..cols {
+        for r in 0..rows {
+            entries.push(form.entries[r * cols + c].clone());
+        }
+    }
+    ShapedForm {
+        shape: (cols, rows),
+        entries,
+    }
+}
+
+/// Standard (2-D) matrix multiplication: entry `(i, j)` of the `m x n`
+/// result is `sum_k l[i, k] * r[k, j]` over the shared `k` dimension. Each
+/// individual product term follows the same "at most one
+/// variable-dependent side" rule as elementwise `Mul` (SPEC-0014); any term
+/// violating it fails with the existing `VECTOR_MUL_ERROR`, accumulated via
+/// repeated `QuadraticForm::add` (SPEC-0018).
+fn matmul_entries(l: &ShapedForm, r: &ShapedForm, n_total: usize) -> Result<ShapedForm, String> {
+    let (m, k) = l.shape;
+    let (k2, n) = r.shape;
+    if k != k2 {
+        return Err(matmul_shape(l.shape, r.shape).unwrap_err());
+    }
+    let mut entries = Vec::with_capacity(m * n);
+    for i in 0..m {
+        for j in 0..n {
+            let mut acc = QuadraticForm::zero(n_total, 0.0);
+            for t in 0..k {
+                let l_entry = &l.entries[i * k + t];
+                let r_entry = &r.entries[t * n + j];
+                let term = if l_entry.is_constant() {
+                    r_entry.clone().scale(l_entry.constant)
+                } else if r_entry.is_constant() {
+                    l_entry.clone().scale(r_entry.constant)
+                } else {
+                    return Err(VECTOR_MUL_ERROR.to_string());
+                };
+                acc = acc.add(&term);
+            }
+            entries.push(acc);
+        }
+    }
+    Ok(ShapedForm {
+        shape: (m, n),
+        entries,
+    })
 }
 
 /// Row-major sub-block selection: entries at rows
@@ -537,6 +621,33 @@ fn quadratize(
             let inner = reduce_expression(expr, index, n)?;
             let selected = select_sub_block(&inner, *row_start, *col_start, *rows, *cols)?;
             Ok(selected
+                .entries
+                .into_iter()
+                .fold(QuadraticForm::zero(n, 0.0), |acc, x| acc.add(&x)))
+        }
+        Expression::MatMul(l, r) => {
+            // Unreachable in practice for the same reason as `Sum`/`Index`
+            // above (SPEC-0018): `is_all_scalar` returns `false` for any
+            // expression containing `MatMul`.
+            let lf = reduce_expression(l, index, n)?;
+            let rf = reduce_expression(r, index, n)?;
+            let result = matmul_entries(&lf, &rf, n)?;
+            Ok(result
+                .entries
+                .into_iter()
+                .fold(QuadraticForm::zero(n, 0.0), |acc, x| acc.add(&x)))
+        }
+        Expression::Transpose(e) => {
+            // Unlike `Sum`/`Index`/`MatMul`, `Transpose` alone does not
+            // force `is_all_scalar` to `false` (`check_expr_shapes`
+            // recurses into its operand, SPEC-0018), so this arm *is*
+            // reachable in practice — e.g. the bare objective
+            // `Expression::transpose(Expression::constant(5.0))`. It is
+            // still a one-entry fold, since a `(1, 1)` operand transposed
+            // is itself `(1, 1)`.
+            let inner = reduce_expression(e, index, n)?;
+            let transposed = transpose_entries(&inner);
+            Ok(transposed
                 .entries
                 .into_iter()
                 .fold(QuadraticForm::zero(n, 0.0), |acc, x| acc.add(&x)))

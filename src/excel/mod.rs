@@ -160,6 +160,31 @@ pub extern "system" fn xlAutoOpen() -> i32 {
     );
 
     reg.add(
+        "CVX.MATMUL",
+        "QQQ$",
+        "left, right, name",
+        "cvxx",
+        "Matrix-multiplies two cvxx expressions and returns the resulting handle.",
+        &[
+            "Handle of the left-hand expression.",
+            "Handle of the right-hand expression.",
+            "Optional unique name for the result.",
+        ],
+    );
+
+    reg.add(
+        "CVX.TRANSPOSE",
+        "QQ$",
+        "operand, name",
+        "cvxx",
+        "Transposes a cvxx expression (rows become columns and vice versa) and returns the resulting handle.",
+        &[
+            "Handle of the expression to transpose.",
+            "Optional unique name for the result.",
+        ],
+    );
+
+    reg.add(
         "CVX.CONSTRAINT",
         "QQQ$",
         "constraint_string, name",

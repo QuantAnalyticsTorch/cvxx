@@ -19,6 +19,10 @@ pub enum Expr {
     Div(ExprNode, ExprNode),
     /// Unary negation.
     Neg(ExprNode),
+    /// Standard matrix multiplication, `a @ b` (SPEC-0018).
+    MatMul(ExprNode, ExprNode),
+    /// Postfix transpose, `a.T` (SPEC-0018).
+    Transpose(ExprNode),
     /// A function-call-syntax node, e.g. `sum(v)` or `index(v, 2, 1)`
     /// (SPEC-0015). Only `name == "sum"` (exactly 1 argument) and
     /// `name == "index"` (exactly 3 or 5 arguments) are recognized by
