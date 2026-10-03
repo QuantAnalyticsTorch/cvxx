@@ -67,10 +67,20 @@ if (-not $SkipBuild) {
 }
 
 $xll = Join-Path $repoRoot 'target\release\cvxx.xll'
+$dll = Join-Path $repoRoot 'target\release\cvxx.dll'
 $xlam = Join-Path $repoRoot 'assets\cvxx.xlam'
 $docsHtml = Join-Path $repoRoot 'docs\html'
 $docsExamples = Join-Path $repoRoot 'docs\examples'
 $installMd = Join-Path $repoRoot 'INSTALL.md'
+
+# `cargo build --release` produces cvxx.dll (the `cdylib` crate-type), never
+# cvxx.xll directly; an XLL is simply a DLL with the exports xladd/Excel
+# expect, renamed with the `.xll` extension. Keep this copy in sync with the
+# freshly built DLL rather than trusting a stale .xll left over from an
+# earlier build.
+if (Test-Path -LiteralPath $dll -PathType Leaf) {
+    Copy-Item -LiteralPath $dll -Destination $xll -Force
+}
 
 if (-not (Test-Path -LiteralPath $xll -PathType Leaf)) {
     throw "cvxx.xll not found at $xll; run 'cargo build --release' first."

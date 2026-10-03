@@ -38,8 +38,13 @@ and must match `Cargo.toml` exactly — CI enforces this on every tagged push.
 ### Build the XLL
 
 ```powershell
-cargo build --release   # produces target/release/cvxx.xll
+cargo build --release   # produces target/release/cvxx.dll
 ```
+
+An Excel XLL is just a DLL with the exports Excel's C API expects, renamed
+with a `.xll` extension — `scripts/package-release.ps1` (below) copies
+`cvxx.dll` to `cvxx.xll` automatically when assembling the release archive;
+there is no separate manual rename step.
 
 `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets -- -D
 warnings`, and `cargo test --workspace` must all pass; the same three
@@ -66,7 +71,7 @@ directly from disk — no local web server or network access required.
 
 ### Assemble a release archive
 
-Once you have built `target/release/cvxx.xll`, `assets/cvxx.xlam`, and
+Once you have built `target/release/cvxx.dll`, `assets/cvxx.xlam`, and
 `docs/html/`, assemble the `cvxx-{version}.zip` release archive (with a
 `SHA256SUMS.txt` checksum file) with:
 

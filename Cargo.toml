@@ -4,7 +4,7 @@ resolver = "2"
 
 [package]
 name = "cvxx"
-version = "0.1.0"
+version = "1.0.0"
 edition = "2021"
 description = "Excel add-in exposing cvxrust convex optimization via a Rust XLL"
 license = "GPL-3.0-only"
