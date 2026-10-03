@@ -32,15 +32,30 @@ required at any point.
 ## 3. Unblock the files
 
 Windows marks files extracted from a downloaded zip as untrusted
-("Mark of the Web"). Excel will otherwise refuse to load the add-ins, or
-open them in Protected View. Unblock everything in one step:
+("Mark of the Web", or MOTW). If left in place, Excel will refuse to even
+*load* `cvxx.xlam` as an add-in — because it contains a VBA project, a
+MOTW-tagged copy trips Excel's "Block macros from running in Office files
+from the internet" policy (enabled by default since 2022), which is
+stricter than the usual Protected View banner and cannot be dismissed by
+clicking "Enable Content".
+
+Unblock everything **after extracting**, not before (unblocking the `.zip`
+itself does not reliably propagate to the files extracted from it):
 
 ```powershell
 Get-ChildItem -Path C:\Tools\cvxx -Recurse | Unblock-File
 ```
 
 Alternatively, right-click each file in File Explorer → **Properties** →
-check **Unblock** → **OK**.
+check **Unblock** → **OK**. To check whether a specific file is still
+blocked:
+
+```powershell
+Get-Item C:\Tools\cvxx\cvxx.xlam -Stream Zone.Identifier -ErrorAction SilentlyContinue
+```
+
+If this prints a `Zone.Identifier` stream, the file is still blocked; if it
+prints nothing, the file is unblocked.
 
 ## 4. Trust the add-ins in Excel
 
@@ -53,8 +68,18 @@ registration rather than relying on a publisher signature:
    `cvxx.xlam`. Both should now be checked in the **Add-Ins available** list.
 4. Click **OK** to load them. A `cvxx` ribbon tab should appear.
 
-If Excel still blocks the files as unsafe, double-check step 3 (unblocking)
-was applied to every file, including the ones inside `docs\`.
+### If Excel reports "blocked macros" or `cvxx.xlam` fails to load
+
+1. Re-run step 3 and confirm **every** file under the extracted folder,
+   including `cvxx.xlam` itself, has no `Zone.Identifier` stream left (a
+   stray blocked file is the most common cause).
+2. If your organization enforces macro security via Group Policy, unblocking
+   may not be enough. Add the folder as a **Trusted Location** instead,
+   which bypasses the MOTW/VBA check entirely:
+   **File** → **Options** → **Trust Center** → **Trust Center Settings…** →
+   **Trusted Locations** → **Add new location…**, browse to your `cvxx`
+   folder (e.g. `C:\Tools\cvxx\`), check **Subfolders of this location are
+   also trusted**, then **OK** and restart Excel.
 
 ## 5. Try it out
 
