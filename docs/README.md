@@ -1,8 +1,8 @@
 # cvxx
 
 `cvxx` brings disciplined convex optimization straight into Excel. Define
-variables, expressions, and constraints with `CVX.*` worksheet formulas,
-solve the resulting problem, and read the results back into your
+parameters, variables, expressions, and constraints with `CVX.*` worksheet
+formulas, solve the resulting problem, and read the results back into your
 spreadsheet.
 
 This offline copy of the documentation is bundled with every
@@ -13,6 +13,7 @@ ribbon's **Help** button. The same Markdown source also renders on
 
 ## Function reference
 
+- [Parameters](parameters.md) — `CVX.PARAMETER`
 - [Variables](variables.md) — `CVX.VARIABLE`
 - [Expressions](expressions.md) — `CVX.EXPRESSION` and the functional builders
 - [Constraints](constraints.md) — `CVX.CONSTRAINT`, `CVX.CONSTRAINTS`, and the

@@ -65,6 +65,16 @@ Build an Excel add-in that exposes `cvxrust` convex optimization to Excel via a 
 
 - Markdown for prose; XML-based notebooks where interactive examples are required.
 - Every specification in `specifications/` must trace back to an issue in `issues/`.
+- Every specification must identify affected user-facing documentation and
+  examples, or explain why it has no user-visible documentation impact.
+- Implementations must update the affected `docs/` pages and examples in the
+  same change as the behavior they describe.
+- The Markdown under `docs/` is the canonical user documentation;
+  `docs/html/` is generated with mdBook and must not be hand-edited.
+- CI builds the book, validates links, and checks that every exported
+  `CVX.*` function is mentioned in the documentation. This coverage check
+  complements, but does not replace, review of accuracy, arguments, results,
+  errors, and examples.
 - All code changes must include tests and a `docs/` update if user-visible.
 
 ## Agent Responsibilities

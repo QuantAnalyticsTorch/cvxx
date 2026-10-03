@@ -27,7 +27,9 @@ Implement technical specifications as Rust code, tests, examples, and documentat
 3. Implement the smallest change that satisfies the specification.
 4. Add unit tests for pure Rust logic.
 5. Add integration tests or sample workbooks where Excel behavior is involved.
-6. Update `docs/` with usage instructions and examples.
+6. Update the user-facing `docs/` pages and examples affected by the
+   specification in the same change. If there is no user-visible
+   documentation impact, record why in the implementation note.
 7. Run `cargo fmt`, `cargo clippy`, and the test suite.
 8. Summarize changes in the specification status.
 

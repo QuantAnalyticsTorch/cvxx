@@ -28,6 +28,8 @@ Take one business issue from `issues/` and produce one or more technical specifi
 4. Draft a specification named `specifications/NNNN-short-title.md`.
 5. Reference the parent issue by ID.
 6. Define: objectives, non-objectives, interfaces, data model, error handling, test approach, and dependencies.
+7. Identify the user-facing documentation pages and examples affected, or
+   explain why the specification has no user-visible documentation impact.
 
 ## Output Format
 
@@ -57,6 +59,10 @@ How errors are reported and recovered.
 
 ## Test Approach
 Unit, integration, and manual validation strategy.
+
+## Documentation Impact
+User-facing documentation pages and examples to update during implementation,
+or why no documentation change is needed.
 
 ## Dependencies
 Other specs, issues, or external libraries.

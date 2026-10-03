@@ -2,6 +2,7 @@
 
 [Introduction](README.md)
 
+- [Parameters](parameters.md)
 - [Variables](variables.md)
 - [Expressions](expressions.md)
 - [Constraints](constraints.md)

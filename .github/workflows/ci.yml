@@ -74,6 +74,10 @@ jobs:
         shell: pwsh
         run: ./scripts/check-docs-links.ps1
 
+      - name: Check public Excel functions are documented
+        shell: pwsh
+        run: ./scripts/check-public-functions-documented.ps1
+
   tag-version-alignment:
     name: Tag/version alignment
     if: startsWith(github.ref, 'refs/tags/v')
