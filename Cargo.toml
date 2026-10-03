@@ -1,5 +1,5 @@
 [workspace]
-members = [".", "cvxrust"]
+members = [".", "cvxrust", "tools/gen-examples"]
 resolver = "2"
 
 [package]

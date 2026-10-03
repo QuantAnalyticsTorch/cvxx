@@ -56,7 +56,7 @@ pub extern "system" fn xlAutoOpen() -> i32 {
 
     reg.add(
         "CVX.ADD",
-        "QQQ$",
+        "QQQQ$",
         "left, right, name",
         "cvxx",
         "Adds two cvxx expressions and returns the resulting handle.",
@@ -69,7 +69,7 @@ pub extern "system" fn xlAutoOpen() -> i32 {
 
     reg.add(
         "CVX.SUB",
-        "QQQ$",
+        "QQQQ$",
         "left, right, name",
         "cvxx",
         "Subtracts two cvxx expressions and returns the resulting handle.",
@@ -82,7 +82,7 @@ pub extern "system" fn xlAutoOpen() -> i32 {
 
     reg.add(
         "CVX.MUL",
-        "QQQ$",
+        "QQQQ$",
         "left, right, name",
         "cvxx",
         "Multiplies two cvxx expressions and returns the resulting handle.",
@@ -95,7 +95,7 @@ pub extern "system" fn xlAutoOpen() -> i32 {
 
     reg.add(
         "CVX.DIV",
-        "QQQ$",
+        "QQQQ$",
         "left, right, name",
         "cvxx",
         "Divides two cvxx expressions and returns the resulting handle.",
@@ -132,7 +132,7 @@ pub extern "system" fn xlAutoOpen() -> i32 {
 
     reg.add(
         "CVX.SCALE",
-        "QQQ$",
+        "QQQQ$",
         "operand, scalar, name",
         "cvxx",
         "Scales a cvxx expression by a numeric constant.",
@@ -161,7 +161,7 @@ pub extern "system" fn xlAutoOpen() -> i32 {
 
     reg.add(
         "CVX.MATMUL",
-        "QQQ$",
+        "QQQQ$",
         "left, right, name",
         "cvxx",
         "Matrix-multiplies two cvxx expressions and returns the resulting handle.",
@@ -174,7 +174,7 @@ pub extern "system" fn xlAutoOpen() -> i32 {
 
     reg.add(
         "CVX.TRANSPOSE",
-        "QQ$",
+        "QQQ$",
         "operand, name",
         "cvxx",
         "Transposes a cvxx expression (rows become columns and vice versa) and returns the resulting handle.",
@@ -198,7 +198,7 @@ pub extern "system" fn xlAutoOpen() -> i32 {
 
     reg.add(
         "CVX.LESS_THAN",
-        "QQQ$",
+        "QQQQ$",
         "left, right, name",
         "cvxx",
         "Builds a cvxx constraint 'left <= right' and returns its handle.",
@@ -211,7 +211,7 @@ pub extern "system" fn xlAutoOpen() -> i32 {
 
     reg.add(
         "CVX.GREATER_THAN",
-        "QQQ$",
+        "QQQQ$",
         "left, right, name",
         "cvxx",
         "Builds a cvxx constraint 'left >= right' and returns its handle.",
@@ -224,7 +224,7 @@ pub extern "system" fn xlAutoOpen() -> i32 {
 
     reg.add(
         "CVX.EQUAL",
-        "QQQ$",
+        "QQQQ$",
         "left, right, name",
         "cvxx",
         "Builds a cvxx constraint 'left == right' and returns its handle.",

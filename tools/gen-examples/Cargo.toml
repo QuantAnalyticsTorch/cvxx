@@ -1,0 +1,23 @@
+[package]
+name = "gen-examples"
+version = "0.1.0"
+edition = "2021"
+description = "Generates the branded cvxx example workbooks under docs/examples/"
+license = "GPL-3.0-only"
+authors = ["cvxx contributors"]
+publish = false
+
+[lib]
+name = "gen_examples"
+path = "src/lib.rs"
+
+[[bin]]
+name = "gen-examples"
+path = "src/main.rs"
+
+[dependencies]
+rust_xlsxwriter = "0.99"
+
+[dev-dependencies]
+regex = "1.13.1"
+zip = { version = "8.6.0", default-features = false, features = ["deflate", "deflate-flate2"] }

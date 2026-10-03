@@ -41,6 +41,13 @@ jobs:
       - name: cargo test
         run: cargo test --workspace
 
+      - name: Generate example workbooks
+        shell: pwsh
+        run: |
+          cargo run -p gen-examples --release -- --out docs/examples
+          if ($LASTEXITCODE -ne 0) { throw "cargo run -p gen-examples failed" }
+          ./scripts/check-examples-generated.ps1
+
       - name: Setup mdBook
         uses: peaceiris/actions-mdbook@v2
         with:

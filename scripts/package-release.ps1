@@ -58,6 +58,8 @@ if (-not $SkipBuild) {
         if ($LASTEXITCODE -ne 0) { throw "cargo build --release failed" }
         mdbook build docs
         if ($LASTEXITCODE -ne 0) { throw "mdbook build failed" }
+        cargo run -p gen-examples --release -- --out docs/examples
+        if ($LASTEXITCODE -ne 0) { throw "cargo run -p gen-examples failed" }
     }
     finally {
         Pop-Location
