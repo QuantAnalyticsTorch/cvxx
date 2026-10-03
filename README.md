@@ -6,7 +6,7 @@
 
 1. **Download the latest release.** Once `cvxx` reaches `v1.0.0`, each [GitHub Release](../../releases) publishes a single `cvxx-{version}.zip` archive containing everything you need: `cvxx.xll`, `cvxx.xlam`, offline documentation, and example workbooks.
 2. **Extract the zip** to a folder of your choice.
-3. **Unblock the files** (Windows marks downloaded files as untrusted): in PowerShell, `Get-ChildItem -Recurse | Unblock-File`.
+3. **Unblock the files** (Windows marks downloaded files as untrusted): double-click `install.bat` in the extracted folder, or run `Get-ChildItem -Recurse | Unblock-File` in PowerShell.
 4. **Load the add-ins in Excel**: `File` → `Options` → `Add-ins` → `Manage: Excel Add-ins` → `Go…` → `Browse…` and select both `cvxx.xll` and `cvxx.xlam` from the extracted folder.
 5. **Open an example workbook** from the `docs/examples/` folder, or click the `cvxx` ribbon tab's **Examples** button to open one directly from Excel.
 6. **Browse the documentation** via the ribbon's **Help** button (opens the bundled offline docs), or read it online under [`docs/`](docs/).

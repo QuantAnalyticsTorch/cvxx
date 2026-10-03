@@ -17,6 +17,10 @@ Define and implement the versioning strategy, local build process, GitHub Action
 - No 32-bit Excel support.
 - No nightly/unstable Rust features.
 - No MSI/EXE installer; the release artifact is a plain `.zip` archive.
+  `install.ps1`/`install.bat` are optional convenience scripts bundled
+  inside that archive (unblocking files, registering a Trusted Location),
+  not a standalone installer; they never run automatically and never
+  perform the Excel add-in registration itself.
 - No client-side analytics, telemetry, or network calls from the rendered documentation site.
 
 ## Interface
@@ -38,6 +42,8 @@ A single `cvxx-{version}.zip` archive is attached to each GitHub Release, contai
 | `docs/html/` | Static HTML docs rendered from `docs/*.md`, with a shared stylesheet and a small bundled JS file for navigation/search; no external assets or network calls |
 | `docs/examples/` | Example workbooks/notebooks, copied as-is from `docs/examples/` |
 | `INSTALL.md` | Install/trust instructions for unsigned add-ins, copied from the repository |
+| `install.ps1` | Optional one-click helper that unblocks every extracted file (removes Mark of the Web) and can register the folder as an Excel Trusted Location; never touches add-in registration itself |
+| `install.bat` | Double-clickable wrapper around `install.ps1` for users uncomfortable running PowerShell scripts directly |
 | `SHA256SUMS.txt` | Checksums for every file in the archive |
 
 ### Git tags

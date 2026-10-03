@@ -72,6 +72,8 @@ $xlam = Join-Path $repoRoot 'assets\cvxx.xlam'
 $docsHtml = Join-Path $repoRoot 'docs\html'
 $docsExamples = Join-Path $repoRoot 'docs\examples'
 $installMd = Join-Path $repoRoot 'INSTALL.md'
+$installPs1 = Join-Path $repoRoot 'install.ps1'
+$installBat = Join-Path $repoRoot 'install.bat'
 
 # `cargo build --release` produces cvxx.dll (the `cdylib` crate-type), never
 # cvxx.xll directly; an XLL is simply a DLL with the exports xladd/Excel
@@ -93,6 +95,12 @@ Assert-NonEmptyDirectory -Path $docsExamples -Description 'docs/examples'
 if (-not (Test-Path -LiteralPath $installMd -PathType Leaf)) {
     throw "INSTALL.md not found at $installMd"
 }
+if (-not (Test-Path -LiteralPath $installPs1 -PathType Leaf)) {
+    throw "install.ps1 not found at $installPs1"
+}
+if (-not (Test-Path -LiteralPath $installBat -PathType Leaf)) {
+    throw "install.bat not found at $installBat"
+}
 
 $stagingRoot = Join-Path $repoRoot "dist\cvxx-$version"
 if (Test-Path -LiteralPath $stagingRoot) {
@@ -104,6 +112,8 @@ New-Item -ItemType Directory -Path (Join-Path $stagingRoot 'docs') | Out-Null
 Copy-Item -LiteralPath $xll -Destination (Join-Path $stagingRoot 'cvxx.xll')
 Copy-Item -LiteralPath $xlam -Destination (Join-Path $stagingRoot 'cvxx.xlam')
 Copy-Item -LiteralPath $installMd -Destination (Join-Path $stagingRoot 'INSTALL.md')
+Copy-Item -LiteralPath $installPs1 -Destination (Join-Path $stagingRoot 'install.ps1')
+Copy-Item -LiteralPath $installBat -Destination (Join-Path $stagingRoot 'install.bat')
 Copy-Item -LiteralPath $docsHtml -Destination (Join-Path $stagingRoot 'docs\html') -Recurse
 Copy-Item -LiteralPath $docsExamples -Destination (Join-Path $stagingRoot 'docs\examples') -Recurse
 
