@@ -193,6 +193,31 @@ pub struct Constraint {
     pub rhs: Expression,
 }
 
+/// Which discrete values a variable's elements are restricted to.
+/// Ordered so that `Binary` is treated as strictly more restrictive than
+/// `Integer` when overlapping domain restrictions apply to the same
+/// scalar entry (SPEC-0019): `Domain::Binary > Domain::Integer`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Domain {
+    Integer,
+    Binary,
+}
+
+/// Restricts a rectangular sub-block of a variable's scalar entries to a
+/// discrete domain. Uses the same row/col addressing as
+/// [`Expression::Index`] (SPEC-0015): `rows` rows starting at `row_start`,
+/// `cols` columns starting at `col_start`, all 0-based, within
+/// `variable`'s shape (SPEC-0019).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DomainConstraint {
+    pub variable: Variable,
+    pub row_start: usize,
+    pub col_start: usize,
+    pub rows: usize,
+    pub cols: usize,
+    pub domain: Domain,
+}
+
 /// A convex optimization problem: an objective with a sense, a list of
 /// constraints, and the ordered list of variables the caller wants solved
 /// values for.
@@ -201,6 +226,11 @@ pub struct Problem {
     pub sense: Sense,
     pub objective: Expression,
     pub constraints: Vec<Constraint>,
+    /// Integer/binary domain restrictions (SPEC-0019). Empty for every
+    /// problem built before this specification; a non-empty list routes
+    /// the problem to the `microlp` translation path instead of
+    /// `clarabel` (see `crate::solver::solve`).
+    pub domains: Vec<DomainConstraint>,
     /// Ordered, positionally aligned with `Solution::variable_values`.
     pub variables: Vec<Variable>,
 }
@@ -211,6 +241,12 @@ pub enum SolveStatus {
     Optimal,
     Infeasible,
     Unbounded,
+    /// A feasible solution honoring every domain restriction was found,
+    /// but the `microlp` branch-and-bound search (SPEC-0019) was stopped
+    /// (time limit or node limit) before optimality could be proven.
+    /// `Solution::objective_value`/`Solution::variable_values` are
+    /// populated with the best incumbent found, exactly as for `Optimal`.
+    StoppedAtLimit,
     Error(String),
 }
 
@@ -220,8 +256,8 @@ pub struct Solution {
     pub status: SolveStatus,
     pub objective_value: Option<f64>,
     /// Aligned by index with `Problem::variables`; each inner `Vec<f64>` is
-    /// row-major data matching that variable's shape. Empty when `status`
-    /// is not `Optimal`.
+    /// row-major data matching that variable's shape. Populated for
+    /// `Optimal` and `StoppedAtLimit`; empty otherwise.
     pub variable_values: Vec<Vec<f64>>,
 }
 

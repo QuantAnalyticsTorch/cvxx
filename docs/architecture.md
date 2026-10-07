@@ -153,3 +153,197 @@ the rendered documentation feel like one product.
 - `tools/gen-examples/src/theme.rs` (the palette's implementation).
 - Future `docs/html` custom-CSS work, if it happens, should cite this
   entry rather than redefine the palette.
+
+---
+date: 2026-10-07
+topic: Mixed-integer linear programming needs a second, dedicated solver crate (not HiGHS, not hand-rolled branch-and-bound on clarabel)
+status: accepted
+---
+
+## Observation
+
+`ISSUE-0019`/`SPEC-0019` needs integer and binary decision variables with
+linear objectives/constraints. `clarabel` (adopted 2026-09-30 for
+continuous LP/QP) is a pure interior-point conic solver: it has no native
+notion of integrality, no warm-start API between related solves, and no
+branch-and-bound layer. Delivering MILP "on top of clarabel" would mean
+`cvxrust` hand-rolling branch-and-bound itself — repeatedly re-solving LP/QP
+relaxations from scratch through the interior-point path, managing
+fractional-variable branching, node bounding/pruning, integrality
+tolerances on interior-point solutions that land near but not exactly on
+integer values, and a time/node-limit cutoff — i.e. exactly the class of
+bespoke numerical-algorithm maintenance the original clarabel decision
+specifically chose to avoid ("[a]voids maintaining bespoke ... logic that a
+real solver already handles correctly and efficiently").
+
+The business issue (`ISSUE-0019`) names `HiGHS` as the user's requested
+technology but explicitly defers the backend choice to architecture
+review. Checking `highs-sys` (the only Rust binding for HiGHS) shows its
+default `build` feature compiles HiGHS's C++ core itself and therefore
+requires both a C++ compiler and CMake on any build machine (Windows
+included: the crate's own install instructions point Windows users at
+`winget install Kitware.CMake` and `winget install LLVM.LLVM`); its
+alternative `discover` feature instead dynamically links a pre-installed
+HiGHS via `pkg-config`, which is no better for a self-contained Windows XLL
+release. Today's entire `cvxx`/`cvxrust` build (`clarabel` + `nalgebra`) is
+pure Rust/cargo, with no C/C++ toolchain step anywhere in `install.ps1`,
+`build.rs`, or CI — HiGHS would be the first component to require one.
+
+By contrast, [`microlp`](https://crates.io/crates/microlp) is a pure-Rust
+(Apache-2.0) LP/MILP solver with its own simplex and built-in
+branch-and-bound for real, integer, and binary variables, zero non-Rust
+runtime dependencies by default (`log`, `sprs`, `web-time`; its optional
+`highs` feature is off by default and must not be enabled here), and a
+solve-outcome model that already distinguishes `SolutionStatus::Optimal`
+from `SolutionStatus::Feasible` (with an explicit `TerminationReason` of
+`ProvenOptimal`, `TimeLimit`, `NodeLimit`, or `MipGap`), plus a first-class
+`set_time_limit`/`SolveOptions::node_limit` budget API.
+
+## Recommendation
+
+1. Reject `HiGHS` as the backend for `ISSUE-0019`/`SPEC-0019`. Its only
+   Rust binding (`highs`/`highs-sys`) requires either compiling a C++ core
+   via CMake or dynamically linking a pre-installed system copy; both
+   introduce a build-toolchain dependency this project has never needed
+   and that the Windows XLL release pipeline is not currently set up to
+   provide. This is purely a backend/technology choice within the scope
+   the business issue left open to architecture review — it does not
+   change the user-facing capability (integer/binary variables, honest
+   "best found so far" reporting) the issue asks for.
+2. Reject hand-rolled branch-and-bound layered over `clarabel` inside
+   `cvxrust`. `clarabel` is an interior-point conic solver with no
+   integrality or warm-start support suited to repeated node re-solves;
+   building and maintaining a correct B&B loop on top of it would
+   reintroduce the bespoke-algorithm maintenance burden the 2026-09-30
+   clarabel decision was adopted specifically to avoid, for a class of
+   problem clarabel was never designed to solve directly.
+3. Adopt [`microlp`](https://crates.io/crates/microlp) as a second,
+   dedicated solver dependency inside `cvxrust`, used only for problems
+   that contain at least one integer or binary variable. Problems with no
+   integer/binary variables continue to route through the existing
+   `clarabel` translation layer unchanged (same behavior, performance, and
+   error messages, per the issue's own acceptance criteria). `cvxrust`
+   gains a second, parallel `Problem` → solver translation path (linear
+   objective/constraints → `microlp::Problem`, continuous/integer/binary
+   variables → `microlp`'s real/integer/binary column kinds) rather than
+   extending the `clarabel`/conic translation layer, because the two
+   solvers accept fundamentally different problem representations; both
+   paths are internal to `cvxrust::solver` and are not a layering
+   exception to the clarabel decision's boundary rule below.
+4. Restate and re-confirm, unchanged, the layering boundary from the
+   2026-09-30 decision: `microlp`, exactly like `clarabel`, is a dependency
+   of `cvxrust` only. `cvxx` continues to depend solely on `cvxrust`'s
+   public API (`Problem`, `SolveStatus`, `Solution`) and must never import
+   `microlp` (or `clarabel`) directly. No `microlp` type may escape
+   `cvxrust::solver` through `cvxrust`'s public surface.
+5. Extend `SolveStatus` with one new variant, `StoppedAtLimit`, carrying
+   the best incumbent found so far rather than silently reporting it as
+   `Optimal` or folding it into `Error`:
+
+   ```rust
+   pub enum SolveStatus {
+       Optimal,
+       Infeasible,
+       Unbounded,
+       /// A feasible mixed-integer solution was found but the search was
+       /// stopped (time limit, node limit, or MIP gap) before optimality
+       /// could be proven. `Solution::objective_value` and
+       /// `Solution::variable_values` are populated with the best
+       /// incumbent found.
+       StoppedAtLimit,
+       Error(String),
+   }
+   ```
+
+   `cvxrust::solver` maps `microlp`'s `SolutionStatus::Optimal` to
+   `SolveStatus::Optimal`, `SolutionStatus::Feasible` (any
+   `TerminationReason` other than `ProvenOptimal`) to
+   `SolveStatus::StoppedAtLimit`, and `Error::Infeasible`/`Error::Unbounded`
+   to the existing `SolveStatus::Infeasible`/`SolveStatus::Unbounded`
+   variants, so MILP and continuous problems share one honest status
+   vocabulary. `SPEC-0019` is responsible for specifying exactly how `cvxx`
+   surfaces `StoppedAtLimit` to the user (per `ISSUE-0019`'s acceptance
+   criterion that this reads as "best answer found so far", not a silent
+   final answer or a generic error).
+6. Set an explicit, documented time limit (via `microlp`'s
+   `SolveOptions::time_limit`) as the primary safeguard against Excel
+   hanging on hard instances, analogous in spirit to the existing
+   `MAX_ITERATIONS = 200` cutoff on `clarabel`'s solves. `SPEC-0019` should
+   pick a concrete default (and whether it is user-configurable) and may
+   additionally reuse or adapt the existing `MAX_VARIABLES`/
+   `MAX_CONSTRAINTS = 200` scalar-size limits from `SPEC-0011` for the
+   MILP path, consistent with keeping Excel responsive. Exceeding a hard
+   size cap remains `SolveStatus::Error`, matching the existing oversize
+   behavior for continuous problems; exceeding the time/node budget while
+   still finding a feasible incumbent is `SolveStatus::StoppedAtLimit`,
+   not an error.
+7. Quadratic objectives/constraints combined with integer/binary variables
+   are out of scope for `SPEC-0019` and should be deferred to a follow-up
+   issue/specification. `microlp` is a linear (MILP) solver only; it has no
+   quadratic-objective or quadratic-constraint support, so mixed-integer
+   quadratic programming (MIQP) is not reachable by adding `microlp` and
+   would require its own, separate technology evaluation (for example, a
+   solver with native MIQP/MISOCP support) if the business decides to
+   pursue it later. `SPEC-0019` should have `cvxx` reject integer/binary
+   variables combined with a quadratic objective or quadratic constraint
+   with the same clear, plain-language "not yet supported" explanation
+   `ISSUE-0019` already requires for other unsupported combinations, rather
+   than silently truncating the problem to its linear terms or producing
+   an incorrect answer.
+
+## Rationale
+
+- Keeps the "one solver framework" discipline from the clarabel decision
+  as narrow as its real justification: `clarabel` is the standing engine
+  for the *continuous* LP/QP problem class because those problem classes
+  are a natural fit for its conic formulation; MILP is a structurally
+  different problem class (branch-and-bound over discrete feasible sets)
+  that no amount of extending the conic translation layer makes clarabel
+  good at, so introducing a second, purpose-built dependency for it is not
+  the same mistake the original decision was guarding against (adopting "a
+  different solver crate per problem class" for continuous problems that
+  *do* all fit one conic formulation).
+- Avoids a bespoke branch-and-bound implementation and everything that
+  comes with getting one numerically right (cycling, tailing-off,
+  integrality tolerance on interior-point output, warm-starting node
+  relaxations), consistent with the standing project preference (stated in
+  the 2026-09-30 decision) for "not maintaining bespoke ... logic that a
+  real solver already handles correctly and efficiently."
+- Protects the Windows XLL build's current pure-Rust/cargo-only toolchain.
+  `HiGHS`'s only Rust binding requires a C++ compiler and CMake (or a
+  pre-installed system library via `pkg-config`), which is a materially
+  larger build-environment footprint than anything `cvxx`/`cvxrust`
+  currently needs, with no pure-Rust HiGHS binding available as an
+  alternative.
+- `microlp`'s existing `SolutionStatus`/`TerminationReason` vocabulary maps
+  almost directly onto `ISSUE-0019`'s acceptance criteria ("best answer
+  found so far" vs. "proven optimal"), reducing the risk of
+  `cvxrust`/`cvxx` inventing ad hoc status semantics that drift from what
+  the underlying solver can actually promise.
+- Preserves the existing `clarabel` behavior, performance, and error
+  messages for purely continuous problems exactly as `ISSUE-0019` requires,
+  since the new dependency only engages when a problem actually declares
+  an integer/binary variable.
+
+## Affected Components
+
+- `specifications/0019-*.md` (to be drafted by the technical analyst,
+  citing this entry for the backend choice, the layering rule, the new
+  `SolveStatus::StoppedAtLimit` variant, and the MIQP out-of-scope call).
+- `cvxrust/Cargo.toml` (new `microlp` dependency, default features only —
+  `microlp`'s own optional `highs` feature must stay disabled).
+- `cvxrust/src/model.rs` (`SolveStatus::StoppedAtLimit` variant).
+- `cvxrust/src/solver.rs` (new `Problem` → `microlp::Problem` translation
+  path for problems with integer/binary variables, routed separately from
+  the existing `clarabel` conic translation; reuses or adapts
+  `MAX_VARIABLES`/`MAX_CONSTRAINTS` from `SPEC-0011` and adds a time/node
+  limit analogous to `MAX_ITERATIONS`).
+- `specifications/0010-convex-solver-backend.md` and
+  `specifications/0011-quadratic-problem-support.md` (unaffected;
+  continuous-only and QP-only solves keep routing through `clarabel`
+  exactly as those specs describe).
+- `.github/copilot-instructions.md`,
+  `.github/agents/cvxx-developer.agent.md`, and
+  `.github/skills/cvxx-optimization-modeling/SKILL.md` should be updated
+  alongside `SPEC-0019`'s implementation to document `microlp` as the
+  standing MILP engine, parallel to how they document `clarabel` today.

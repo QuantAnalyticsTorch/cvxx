@@ -31,9 +31,10 @@ Returns a `cvx:obj:<uuid>` handle.
 - `constraints`: one of:
   - blank — the problem has no constraints;
   - a single cell naming a constraint set (from `CVX.CONSTRAINTS`) — that
-    set's constraints are used directly;
-  - a range of constraint handles or names — flattened row-major, blank
-    cells skipped.
+    set's constraints and domain restrictions are used directly;
+  - a range of constraint and/or domain (`CVX.INTEGER`/`CVX.BINARY`, see
+    [variables.md](variables.md)) handles or names, mixed freely —
+    flattened row-major, blank cells skipped.
 - `name`: optional unique name for the problem.
 
 Returns a `cvx:prob:<uuid>` handle.
@@ -49,14 +50,39 @@ Returns a `cvx:prob:<uuid>` handle.
 - `problem`: handle or name of a problem created by `CVX.PROBLEM`.
 - `name`: optional unique name for the result.
 
-Returns a `cvx:result:<uuid>` handle on `Optimal`, `Infeasible`, or
-`Unbounded` outcomes.
+Returns a `cvx:result:<uuid>` handle on `Optimal`, `Infeasible`,
+`Unbounded`, or `StoppedAtLimit` outcomes.
 
 `cvxrust` solves affine or convex quadratic objectives subject to affine
 `<=`/`>=`/`=` constraints and convex quadratic `<=`/`>=` constraints, by
 translating the problem into a conic program and delegating to the
 `clarabel` solver. A quadratic term is any product of two
 variable-dependent sub-expressions (e.g. `x * x` or `x * y`).
+
+### Mixed-integer problems
+
+If the problem includes at least one integer/binary domain restriction
+(from `CVX.INTEGER`/`CVX.BINARY`), `cvxx` instead translates it into a
+mixed-integer linear program and delegates to the `microlp` solver, a
+branch-and-bound search over the affine/linear problem class. This path
+does **not** support quadratic objectives or constraint terms — combining
+`CVX.INTEGER`/`CVX.BINARY` with a quadratic term anywhere in the problem
+fails with a descriptive error (`#VALUE!`), naming the unsupported
+combination. Remove the quadratic term or the integer/binary declaration to
+resolve it.
+
+Because branch-and-bound search can in principle run indefinitely, the
+mixed-integer solve path applies a fixed time limit (10 seconds) and node
+limit (100,000 search nodes). If the search finds a feasible solution but
+is stopped by one of these limits before it can prove that solution is
+optimal, `CVX.SOLVE` returns a result with status `StoppedAtLimit`
+(`CVX.STATUS` reports `"stopped_at_limit"`): the best solution found so
+far, not a guaranteed optimum. `CVX.OBJECTIVE_VALUE`/`CVX.VALUE` return
+that best-found objective/variable values normally for a `StoppedAtLimit`
+result, the same as for `Optimal`. If the search is stopped by a limit
+before finding any feasible solution at all, `CVX.SOLVE` instead fails with
+a descriptive error (`#VALUE!`): feasibility is undetermined in that case,
+which is different from a proven `Infeasible` outcome.
 
 Variables and parameters may be a vector or a matrix, not just a single
 number (`1x1`): constraints broadcast per-entry, the same way
@@ -102,11 +128,12 @@ Problems outside this class fail with a descriptive error and return
 ## Error conditions
 
 - Unknown or wrong-kind objective/problem handles return `#VALUE!`.
-- Unresolvable constraint handles/names within `constraints` return `#VALUE!`.
+- Unresolvable constraint/domain handles/names within `constraints` return
+  `#VALUE!`.
 - A solver failure (an unsupported problem type, reported as a descriptive
   error message) returns `#VALUE!` and does not create a result entry.
-  `Infeasible` and `Unbounded` outcomes are not failures: they store a
-  result entry with that status, same as `Optimal`.
+  `Infeasible`, `Unbounded`, and `StoppedAtLimit` outcomes are not
+  failures: they store a result entry with that status, same as `Optimal`.
 - Duplicate names return `#VALUE!`.
 - Diagnostics are logged to `%TEMP%/cvxx.log`.
 
@@ -122,9 +149,10 @@ Once `CVX.SOLVE` returns a result handle, use:
 
 to read back the solve status, the objective value, and each variable's
 solved value(s) (a scalar for a `(1, 1)` variable, a row-major array
-otherwise). `CVX.OBJECTIVE_VALUE` and `CVX.VALUE` return `#VALUE!` for a
-non-`Optimal` result, since no objective/variable values are stored for
-`Infeasible`/`Unbounded` outcomes. `CVX.DESCRIBE`/`CVX.TYPE` (see
-[inspection.md](inspection.md)) also work on result, problem, and objective
-handles, alongside every other object kind. See
+otherwise). `CVX.OBJECTIVE_VALUE` and `CVX.VALUE` succeed for both
+`Optimal` and `StoppedAtLimit` results, but return `#VALUE!` for
+`Infeasible`/`Unbounded`, since no objective/variable values are stored for
+those outcomes. `CVX.DESCRIBE`/`CVX.TYPE` (see
+[inspection.md](inspection.md)) also work on result, problem, objective,
+and domain handles, alongside every other object kind. See
 [inspection.md](inspection.md) for full details.

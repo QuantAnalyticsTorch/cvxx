@@ -213,46 +213,54 @@ pub(crate) fn resolve_handle_arg(arg: LPXLOPER12) -> Result<Expression, CvxError
     let text = data::parse_string(&Variant::from_xloper(arg))?
         .trim()
         .to_string();
+    resolve_handle_text(&text)
+}
 
+/// Text-based core of [`resolve_handle_arg`], split out so other modules
+/// (e.g. `excel::domain`, SPEC-0019) that already have a trimmed `&str`
+/// operand can reuse the same handle/name resolution rules without
+/// round-tripping through an `LPXLOPER12`.
+pub(crate) fn resolve_handle_text(text: &str) -> Result<Expression, CvxError> {
     if text.starts_with("cvx:") {
-        let (kind, uuid) = parse_handle(&text)?;
+        let (kind, uuid) = parse_handle(text)?;
         let registry = Registry::global();
         match kind {
             HandleKind::Param => registry
                 .get_parameter_by_uuid(uuid)
                 .map(|e| Expression::from_parameter(parameter_id(e.uuid), e.shape, e.data))
-                .ok_or_else(|| CvxError::UnknownIdentifier(text.clone())),
+                .ok_or_else(|| CvxError::UnknownIdentifier(text.to_string())),
             HandleKind::Var => registry
                 .get_variable_by_uuid(uuid)
                 .map(|e| Expression::from_variable(e.variable))
-                .ok_or_else(|| CvxError::UnknownIdentifier(text.clone())),
+                .ok_or_else(|| CvxError::UnknownIdentifier(text.to_string())),
             HandleKind::Expr => registry
                 .get_expression_by_uuid(uuid)
                 .map(|e| e.expression)
-                .ok_or_else(|| CvxError::UnknownIdentifier(text.clone())),
+                .ok_or_else(|| CvxError::UnknownIdentifier(text.to_string())),
             HandleKind::Constr
             | HandleKind::ConstrSet
             | HandleKind::Obj
             | HandleKind::Prob
-            | HandleKind::Result => Err(CvxError::UnknownIdentifier(text.clone())),
+            | HandleKind::Result
+            | HandleKind::Dom => Err(CvxError::UnknownIdentifier(text.to_string())),
         }
     } else {
         // Allow referencing named objects by name as a convenience.
         let registry = Registry::global();
-        if let Some(entry) = registry.get_parameter_by_name(&text) {
+        if let Some(entry) = registry.get_parameter_by_name(text) {
             return Ok(Expression::from_parameter(
                 parameter_id(entry.uuid),
                 entry.shape,
                 entry.data,
             ));
         }
-        if let Some(entry) = registry.get_variable_by_name(&text) {
+        if let Some(entry) = registry.get_variable_by_name(text) {
             return Ok(Expression::from_variable(entry.variable));
         }
-        if let Some(entry) = registry.get_expression_by_name(&text) {
+        if let Some(entry) = registry.get_expression_by_name(text) {
             return Ok(entry.expression);
         }
-        Err(CvxError::UnknownIdentifier(text))
+        Err(CvxError::UnknownIdentifier(text.to_string()))
     }
 }
 
@@ -287,29 +295,10 @@ mod tests {
     }
 
     fn resolve_handle_for_test(handle: &str) -> Result<Expression, CvxError> {
-        // The real resolve_handle_arg takes an LPXLOPER12; for unit tests we
-        // bypass the XLOPER wrapper and use the registry directly.
-        let (kind, uuid) = parse_handle(handle)?;
-        let registry = Registry::global();
-        match kind {
-            HandleKind::Param => registry
-                .get_parameter_by_uuid(uuid)
-                .map(|e| Expression::from_parameter(parameter_id(e.uuid), e.shape, e.data))
-                .ok_or_else(|| CvxError::UnknownIdentifier(handle.to_string())),
-            HandleKind::Var => registry
-                .get_variable_by_uuid(uuid)
-                .map(|e| Expression::from_variable(e.variable))
-                .ok_or_else(|| CvxError::UnknownIdentifier(handle.to_string())),
-            HandleKind::Expr => registry
-                .get_expression_by_uuid(uuid)
-                .map(|e| e.expression)
-                .ok_or_else(|| CvxError::UnknownIdentifier(handle.to_string())),
-            HandleKind::Constr
-            | HandleKind::ConstrSet
-            | HandleKind::Obj
-            | HandleKind::Prob
-            | HandleKind::Result => Err(CvxError::UnknownIdentifier(handle.to_string())),
-        }
+        // `resolve_handle_arg` takes an `LPXLOPER12`; for unit tests we
+        // bypass the XLOPER wrapper and use the shared text-based core
+        // directly.
+        resolve_handle_text(handle)
     }
 
     // `run_index` itself takes `LPXLOPER12` and can't be driven directly in

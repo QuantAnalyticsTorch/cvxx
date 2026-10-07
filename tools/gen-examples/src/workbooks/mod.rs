@@ -5,6 +5,7 @@
 pub mod constraints;
 pub mod expressions;
 pub mod inspecting_results;
+pub mod mixed_integer_programming;
 pub mod overview;
 pub mod parameters_and_variables;
 pub mod problems_and_solving;
@@ -42,5 +43,9 @@ pub const WORKBOOKS: &[(&str, &str)] = &[
     (
         "07-inspecting-results.xlsx",
         "Re-examining a solved diet problem: reading back status, cost, quantities, and handle descriptions.",
+    ),
+    (
+        "08-mixed-integer-programming.xlsx",
+        "Project selection: choosing which proposals to fund (yes/no decisions) within a fixed budget.",
     ),
 ];

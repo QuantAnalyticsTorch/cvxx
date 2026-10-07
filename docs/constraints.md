@@ -56,17 +56,22 @@ registered name, or a bare numeric literal.
 CVX.CONSTRAINTS(constraints, [name])
 ```
 
-- `constraints`: a range containing constraint handles or names. Blank cells
-  are skipped.
+- `constraints`: a range containing constraint handles/names and/or domain
+  handles/names (from `CVX.INTEGER`/`CVX.BINARY`, see
+  [variables.md](variables.md)), mixed freely. Blank cells are skipped.
 - `name`: optional unique name for the resulting constraint set.
 
 Returns a `cvx:constrset:<uuid>` handle referencing the ordered list of
-resolved constraints, ready to pass to the problem builder.
+resolved constraints and/or domain restrictions, ready to pass to the
+problem builder. `CVX.PROBLEM`'s `constraints` argument accepts the same mix
+of constraint and domain handles/names directly, with or without going
+through `CVX.CONSTRAINTS` first (see [problems.md](problems.md)).
 
 ### Example
 
 ```excel
 =CVX.CONSTRAINTS(A1:A5, "my_constraints")
+=CVX.CONSTRAINTS({"cvx:constr:...", "cvx:dom:..."}, "mixed_set")
 ```
 
 ## Error conditions
@@ -74,13 +79,14 @@ resolved constraints, ready to pass to the problem builder.
 - Invalid constraint syntax (missing, duplicated, or nested relational
   operator) returns `#VALUE!`.
 - Unknown identifiers return `#VALUE!` and name the unresolved item.
-- A `CVX.CONSTRAINTS` entry that is not a known constraint handle or name
-  returns `#VALUE!`.
-- An empty constraint set (no resolvable constraints) returns `#VALUE!`.
+- A `CVX.CONSTRAINTS` entry that is not a known constraint, constraint-set,
+  or domain handle/name returns `#VALUE!`.
+- An empty constraint set (no resolvable constraints or domains) returns
+  `#VALUE!`.
 - Duplicate names return `#VALUE!`.
 - Diagnostics are logged to `%TEMP%/cvxx.log`.
 
 Use `CVX.DESCRIBE`/`CVX.TYPE` (see [inspection.md](inspection.md)) to get a
-diagnostic description of a constraint or constraint set, by handle or by
-name (constraints and constraint sets have no shape, so `CVX.SHAPE` does
-not apply to them).
+diagnostic description of a constraint, constraint set, or domain
+restriction, by handle or by name (constraints, constraint sets, and domain
+restrictions have no shape, so `CVX.SHAPE` does not apply to them).

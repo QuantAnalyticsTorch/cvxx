@@ -2,6 +2,7 @@
 //! directly to Excel.
 
 pub mod constraint;
+pub mod domain;
 pub mod expression;
 pub mod inspect;
 pub mod parameter;
@@ -240,10 +241,34 @@ pub extern "system" fn xlAutoOpen() -> i32 {
         "QQQ$",
         "constraints, name",
         "cvxx",
-        "Combines a range of cvxx constraint handles into a constraint set handle.",
+        "Combines a range of cvxx constraint and/or domain handles into a constraint set handle.",
         &[
-            "A range of constraint handles or names. Blank cells are skipped.",
+            "A range of constraint and/or domain (CVX.INTEGER/CVX.BINARY) handles or names. Blank cells are skipped.",
             "Optional unique name for the constraint set.",
+        ],
+    );
+
+    reg.add(
+        "CVX.INTEGER",
+        "QQQ$",
+        "variable, name",
+        "cvxx",
+        "Restricts a variable's entries to integer values and returns a cvxx domain handle.",
+        &[
+            "Handle or name of a variable, or a CVX.INDEX selection directly over a variable.",
+            "Optional unique name for the domain restriction.",
+        ],
+    );
+
+    reg.add(
+        "CVX.BINARY",
+        "QQQ$",
+        "variable, name",
+        "cvxx",
+        "Restricts a variable's entries to 0/1 values and returns a cvxx domain handle.",
+        &[
+            "Handle or name of a variable, or a CVX.INDEX selection directly over a variable.",
+            "Optional unique name for the domain restriction.",
         ],
     );
 
@@ -279,7 +304,7 @@ pub extern "system" fn xlAutoOpen() -> i32 {
         "Combines an objective and constraints into a cvxx problem and returns its handle.",
         &[
             "Handle or name of an objective created by CVX.MINIMIZE or CVX.MAXIMIZE.",
-            "Blank, a constraint set handle/name, or a range of constraint handles/names.",
+            "Blank, a constraint set handle/name, or a range of constraint and/or domain (CVX.INTEGER/CVX.BINARY) handles/names.",
             "Optional unique name for the problem.",
         ],
     );
@@ -313,7 +338,7 @@ pub extern "system" fn xlAutoOpen() -> i32 {
         "QQ$",
         "result",
         "cvxx",
-        "Returns the solve status of a cvxx result as a string.",
+        "Returns the solve status of a cvxx result as a string (\"optimal\", \"infeasible\", \"unbounded\", \"stopped_at_limit\", or \"error\").",
         &["Handle or name of a result created by CVX.SOLVE."],
     );
 
@@ -322,7 +347,7 @@ pub extern "system" fn xlAutoOpen() -> i32 {
         "QQ$",
         "result",
         "cvxx",
-        "Returns the objective value of an optimal cvxx result.",
+        "Returns the objective value of an optimal (or stopped-at-limit) cvxx result.",
         &["Handle or name of a result created by CVX.SOLVE."],
     );
 
@@ -331,7 +356,7 @@ pub extern "system" fn xlAutoOpen() -> i32 {
         "QQ$",
         "handle",
         "cvxx",
-        "Describes any cvxx registry object (parameter, variable, expression, constraint, constraint set, objective, problem, or result) as a diagnostic string.",
+        "Describes any cvxx registry object (parameter, variable, expression, constraint, constraint set, objective, problem, domain, or result) as a diagnostic string.",
         &["Handle or name of any cvxx registry object."],
     );
 

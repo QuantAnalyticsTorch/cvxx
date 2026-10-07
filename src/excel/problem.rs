@@ -10,9 +10,9 @@ use xladd::xlcall::LPXLOPER12;
 use crate::analytics::ast::Relation;
 use crate::core::error::CvxError;
 use crate::core::handle::{parse_handle, HandleKind};
-use crate::core::registry::{ExpressionEntry, Registry};
+use crate::core::registry::{ConstraintSetItem, ExpressionEntry, Registry};
 use crate::data;
-use crate::excel::constraint::{resolve_constraint_uuid, resolve_operand};
+use crate::excel::constraint::{resolve_constraint_set_item, resolve_operand};
 use crate::excel::expression::to_xloper_result;
 use cvxrust::Sense;
 
@@ -70,7 +70,7 @@ fn run_problem(
         .get_objective_by_uuid(objective_uuid)
         .ok_or_else(|| CvxError::Registry("objective disappeared".to_string()))?;
 
-    let constraint_uuids = resolve_constraints_arg(constraints)?;
+    let (constraint_uuids, domain_uuids) = resolve_constraints_arg(constraints)?;
 
     let mut seen_vars = HashSet::new();
     let mut seen_exprs = HashSet::new();
@@ -93,9 +93,28 @@ fn run_problem(
             );
         }
     }
+    // Domain-restricted variables (SPEC-0019) must also be solved for,
+    // even when they appear in no other constraint or in the objective.
+    for uuid in &domain_uuids {
+        if let Some(domain_entry) = registry.get_domain_by_uuid(*uuid) {
+            if let Some(variable_entry) =
+                registry.get_variable_by_variable_id(domain_entry.domain.variable.id)
+            {
+                if seen_vars.insert(variable_entry.uuid) {
+                    variables.push(variable_entry.uuid);
+                }
+            }
+        }
+    }
 
     let name = data::parse_optional_name(&Variant::from_xloper(name))?;
-    registry.insert_problem(name, objective_uuid, constraint_uuids, variables)
+    registry.insert_problem(
+        name,
+        objective_uuid,
+        constraint_uuids,
+        domain_uuids,
+        variables,
+    )
 }
 
 fn resolve_objective_uuid(arg: LPXLOPER12) -> Result<Uuid, CvxError> {
@@ -121,14 +140,16 @@ fn resolve_objective_uuid(arg: LPXLOPER12) -> Result<Uuid, CvxError> {
 }
 
 /// Resolves the `constraints` argument of `CVX.PROBLEM`. A blank/missing
-/// argument yields no constraints. A single non-blank cell naming a
-/// constraint set uses that set's constraints directly; otherwise every
-/// non-blank cell is resolved as an individual constraint handle/name.
-fn resolve_constraints_arg(arg: LPXLOPER12) -> Result<Vec<Uuid>, CvxError> {
+/// argument yields no constraints or domains. A single non-blank cell
+/// naming a constraint set uses that set's members directly; otherwise
+/// every non-blank cell is resolved as an individual constraint or domain
+/// handle/name (SPEC-0019). Returns the resolved constraint UUIDs and
+/// domain UUIDs separately.
+fn resolve_constraints_arg(arg: LPXLOPER12) -> Result<(Vec<Uuid>, Vec<Uuid>), CvxError> {
     let variant = Variant::from_xloper(arg);
     let (cols, rows) = variant.dim();
     if cols == 0 || rows == 0 {
-        return Ok(Vec::new());
+        return Ok((Vec::new(), Vec::new()));
     }
 
     if cols == 1 && rows == 1 {
@@ -137,23 +158,38 @@ fn resolve_constraints_arg(arg: LPXLOPER12) -> Result<Vec<Uuid>, CvxError> {
             .next()
             .flatten();
         let Some(text) = cell else {
-            return Ok(Vec::new());
+            return Ok((Vec::new(), Vec::new()));
         };
-        if let Some(uuids) = resolve_constraint_set(&text)? {
-            return Ok(uuids);
+        if let Some(items) = resolve_constraint_set(&text)? {
+            return Ok(split_items(items));
         }
-        return Ok(vec![resolve_constraint_uuid(&text)?]);
+        return Ok(split_items(vec![resolve_constraint_set_item(&text)?]));
     }
 
     let entries = data::parse_optional_string_range(&variant)?;
-    let mut uuids = Vec::new();
+    let mut items = Vec::new();
     for entry in entries.into_iter().flatten() {
-        uuids.push(resolve_constraint_uuid(&entry)?);
+        items.push(resolve_constraint_set_item(&entry)?);
     }
-    Ok(uuids)
+    Ok(split_items(items))
 }
 
-fn resolve_constraint_set(text: &str) -> Result<Option<Vec<Uuid>>, CvxError> {
+/// Splits an ordered list of `ConstraintSetItem`s into its
+/// constraint/domain UUID buckets, each preserving the original relative
+/// order within its own bucket (SPEC-0019).
+fn split_items(items: Vec<ConstraintSetItem>) -> (Vec<Uuid>, Vec<Uuid>) {
+    let mut constraints = Vec::new();
+    let mut domains = Vec::new();
+    for item in items {
+        match item {
+            ConstraintSetItem::Constraint(uuid) => constraints.push(uuid),
+            ConstraintSetItem::Domain(uuid) => domains.push(uuid),
+        }
+    }
+    (constraints, domains)
+}
+
+fn resolve_constraint_set(text: &str) -> Result<Option<Vec<ConstraintSetItem>>, CvxError> {
     let registry = Registry::global();
 
     if text.starts_with("cvx:") {
@@ -163,13 +199,13 @@ fn resolve_constraint_set(text: &str) -> Result<Option<Vec<Uuid>>, CvxError> {
         }
         return registry
             .get_constraint_set_by_uuid(uuid)
-            .map(|entry| Some(entry.constraints))
+            .map(|entry| Some(entry.items))
             .ok_or_else(|| CvxError::UnknownIdentifier(text.to_string()));
     }
 
     Ok(registry
         .get_constraint_set_by_name(text)
-        .map(|entry| entry.constraints))
+        .map(|entry| entry.items))
 }
 
 /// Recursively resolves a list of dependency strings (handles or names) to
@@ -272,10 +308,19 @@ fn run_solve(problem: LPXLOPER12, name: LPXLOPER12) -> Result<String, CvxError> 
         cvx_variables.push(entry.variable);
     }
 
+    let mut cvx_domains = Vec::with_capacity(problem_entry.domains.len());
+    for uuid in &problem_entry.domains {
+        let entry = registry
+            .get_domain_by_uuid(*uuid)
+            .ok_or_else(|| CvxError::Registry("domain missing for problem".to_string()))?;
+        cvx_domains.push(entry.domain);
+    }
+
     let cvx_problem = cvxrust::Problem {
         sense: objective_entry.sense,
         objective: objective_entry.expression,
         constraints: cvx_constraints,
+        domains: cvx_domains,
         variables: cvx_variables,
     };
 
@@ -448,6 +493,7 @@ mod tests {
                 Some("solve_error_test_problem".to_string()),
                 parse_handle(&objective_handle).unwrap().1,
                 vec![],
+                vec![],
                 vec![var_uuid],
             )
             .unwrap();
@@ -515,6 +561,7 @@ mod tests {
                 Some("solve_variable_identity_test_problem".to_string()),
                 parse_handle(&objective_handle).unwrap().1,
                 vec![x_constraint_uuid, y_constraint_uuid],
+                vec![],
                 vec![x_uuid, y_uuid],
             )
             .unwrap();
@@ -619,7 +666,13 @@ mod tests {
         assert_eq!(variables, vec![w_uuid]);
 
         let problem_handle = registry
-            .insert_problem(None, objective_uuid, vec![bound_uuid, pin_uuid], variables)
+            .insert_problem(
+                None,
+                objective_uuid,
+                vec![bound_uuid, pin_uuid],
+                vec![],
+                variables,
+            )
             .unwrap();
 
         let result_handle = run_solve_for_test(&problem_handle, None).unwrap();
@@ -634,6 +687,182 @@ mod tests {
         assert!((values[0] - 0.0).abs() < 1e-4);
         assert!((values[1] - 5.0).abs() < 1e-4);
         assert!((values[2] - 0.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn solves_mixed_integer_knapsack_end_to_end_with_a_binary_domain() {
+        // Integration test (SPEC-0019's Test Approach): a sample problem
+        // with a `CVX.BINARY`-style domain restriction over a whole
+        // variable, combined with an ordinary constraint, is resolved by
+        // `CVX.PROBLEM`/`CVX.SOLVE`'s real domain-aware path and solved via
+        // the `microlp` route, matching the project-selection/knapsack
+        // scenario from `ISSUE-0019`.
+        let registry = Registry::global();
+
+        registry
+            .insert_parameter(
+                Some("knapsack_weights_for_test".to_string()),
+                (4, 1),
+                vec![2.0, 3.0, 4.0, 5.0],
+            )
+            .unwrap();
+        registry
+            .insert_parameter(
+                Some("knapsack_values_for_test".to_string()),
+                (4, 1),
+                vec![3.0, 4.0, 5.0, 8.0],
+            )
+            .unwrap();
+        registry
+            .insert_parameter(
+                Some("knapsack_capacity_for_test".to_string()),
+                (1, 1),
+                vec![5.0],
+            )
+            .unwrap();
+
+        let selected_handle = registry
+            .insert_variable(Some("knapsack_selected_for_test".to_string()), (4, 1))
+            .unwrap();
+        let (_, selected_uuid) = parse_handle(&selected_handle).unwrap();
+        let selected_variable = registry
+            .get_variable_by_uuid(selected_uuid)
+            .unwrap()
+            .variable;
+
+        let domain_handle = registry
+            .insert_domain(
+                None,
+                cvxrust::DomainConstraint {
+                    variable: selected_variable,
+                    row_start: 0,
+                    col_start: 0,
+                    rows: 4,
+                    cols: 1,
+                    domain: cvxrust::Domain::Binary,
+                },
+            )
+            .unwrap();
+        let (_, domain_uuid) = parse_handle(&domain_handle).unwrap();
+
+        let capacity_ast = crate::analytics::parser::parse_constraint(
+            "sum(knapsack_weights_for_test * knapsack_selected_for_test) <= knapsack_capacity_for_test",
+        )
+        .unwrap();
+        let capacity_resolved =
+            crate::analytics::resolve::resolve_constraint(registry, &capacity_ast).unwrap();
+        let capacity_handle = registry
+            .insert_constraint(
+                None,
+                capacity_resolved.relation,
+                capacity_resolved.lhs,
+                capacity_resolved.rhs,
+                capacity_resolved.dependencies,
+            )
+            .unwrap();
+        let (_, capacity_uuid) = parse_handle(&capacity_handle).unwrap();
+
+        let objective_ast = crate::analytics::parser::parse(
+            "sum(knapsack_values_for_test * knapsack_selected_for_test)",
+        )
+        .unwrap();
+        let objective_resolved =
+            crate::analytics::resolve::resolve_expr(registry, &objective_ast).unwrap();
+        let objective_handle = registry
+            .insert_objective(
+                None,
+                Sense::Maximize,
+                objective_resolved.expression,
+                objective_resolved.dependencies,
+            )
+            .unwrap();
+        let (_, objective_uuid) = parse_handle(&objective_handle).unwrap();
+
+        let problem_handle = registry
+            .insert_problem(
+                Some("knapsack_problem_for_test".to_string()),
+                objective_uuid,
+                vec![capacity_uuid],
+                vec![domain_uuid],
+                vec![selected_uuid],
+            )
+            .unwrap();
+
+        let result_handle = run_solve_for_test_with_domains(&problem_handle, None).unwrap();
+        let (_, result_uuid) = parse_handle(&result_handle).unwrap();
+        let result_entry = registry.get_result_by_uuid(result_uuid).unwrap();
+
+        assert_eq!(result_entry.status, cvxrust::SolveStatus::Optimal);
+        assert!((result_entry.objective_value.unwrap() - 8.0).abs() < 1e-4);
+        let values = &result_entry.variable_values[&selected_uuid];
+        // Only the fourth item (weight 5, value 8) fits the capacity-5
+        // knapsack on its own and beats every other feasible combination.
+        assert!((values[0] - 0.0).abs() < 1e-6);
+        assert!((values[1] - 0.0).abs() < 1e-6);
+        assert!((values[2] - 0.0).abs() < 1e-6);
+        assert!((values[3] - 1.0).abs() < 1e-6);
+    }
+
+    /// Like `run_solve_for_test`, but routes `problem_entry.domains` into
+    /// `cvxrust::Problem::domains` too, exercising the same domain-aware
+    /// path as the real `run_solve`.
+    fn run_solve_for_test_with_domains(
+        problem_text: &str,
+        name: Option<String>,
+    ) -> Result<String, CvxError> {
+        let registry = Registry::global();
+        let problem_uuid = resolve_objective_and_problem_uuid_for_test(problem_text);
+        let problem_entry = registry.get_problem_by_uuid(problem_uuid).unwrap();
+        let objective_entry = registry
+            .get_objective_by_uuid(problem_entry.objective)
+            .unwrap();
+
+        let mut cvx_constraints = Vec::with_capacity(problem_entry.constraints.len());
+        for uuid in &problem_entry.constraints {
+            let entry = registry.get_constraint_by_uuid(*uuid).unwrap();
+            cvx_constraints.push(cvxrust::Constraint {
+                relation: translate_relation(entry.relation),
+                lhs: entry.lhs,
+                rhs: entry.rhs,
+            });
+        }
+
+        let mut cvx_variables = Vec::with_capacity(problem_entry.variables.len());
+        for uuid in &problem_entry.variables {
+            let entry = registry.get_variable_by_uuid(*uuid).unwrap();
+            cvx_variables.push(entry.variable);
+        }
+
+        let mut cvx_domains = Vec::with_capacity(problem_entry.domains.len());
+        for uuid in &problem_entry.domains {
+            let entry = registry.get_domain_by_uuid(*uuid).unwrap();
+            cvx_domains.push(entry.domain);
+        }
+
+        let cvx_problem = cvxrust::Problem {
+            sense: objective_entry.sense,
+            objective: objective_entry.expression,
+            constraints: cvx_constraints,
+            domains: cvx_domains,
+            variables: cvx_variables,
+        };
+        let solution = cvxrust::solve(&cvx_problem);
+        if let cvxrust::SolveStatus::Error(message) = &solution.status {
+            return Err(CvxError::SolveFailed(message.clone()));
+        }
+
+        let mut variable_values = HashMap::with_capacity(problem_entry.variables.len());
+        for (uuid, values) in problem_entry.variables.iter().zip(solution.variable_values) {
+            variable_values.insert(*uuid, values);
+        }
+
+        registry.insert_result(
+            name,
+            problem_uuid,
+            solution.status,
+            solution.objective_value,
+            variable_values,
+        )
     }
 
     fn run_solve_for_test(problem_text: &str, name: Option<String>) -> Result<String, CvxError> {
@@ -664,6 +893,7 @@ mod tests {
             sense: objective_entry.sense,
             objective: objective_entry.expression,
             constraints: cvx_constraints,
+            domains: vec![],
             variables: cvx_variables,
         };
         let solution = cvxrust::solve(&cvx_problem);

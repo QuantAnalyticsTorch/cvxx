@@ -42,6 +42,10 @@ const NAMED_BUILDERS: &[(&str, Builder)] = &[
         "07-inspecting-results.xlsx",
         workbooks::inspecting_results::build,
     ),
+    (
+        "08-mixed-integer-programming.xlsx",
+        workbooks::mixed_integer_programming::build,
+    ),
 ];
 
 /// Every workbook's (file name, builder) pair, in build order.

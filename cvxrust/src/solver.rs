@@ -11,7 +11,7 @@ use clarabel::solver::{
 };
 use nalgebra::{DMatrix, SymmetricEigen};
 
-use crate::model::{Problem, Relation, Sense, Solution, SolveStatus};
+use crate::model::{Problem, Relation, Sense, Solution, SolveStatus, Variable};
 use crate::reduce::{broadcast_shape, entry_at, reduce_expression, QuadraticForm};
 
 /// Upper bound on the number of scalar decision variables and constraint
@@ -147,19 +147,43 @@ fn build_soc_block(diff: &QuadraticForm, n: usize) -> Result<Option<SocBlock>, S
     Ok(Some((a_rows, b_vals)))
 }
 
-/// Attempts to solve `problem` by translating it into a conic program and
-/// delegating to `clarabel`. See the crate-level docs and `SPEC-0010`/
-/// `SPEC-0014` for the supported problem class.
+/// Attempts to solve `problem`, routing to the `clarabel`-backed
+/// continuous path when it has no domain restrictions, or to the
+/// `microlp`-backed mixed-integer path (SPEC-0019,
+/// `crate::solver_milp::solve_mixed_integer`) otherwise. See the
+/// crate-level docs for the rationale.
 pub fn solve(problem: &Problem) -> Solution {
-    const SIZE_LIMIT_ERROR: &str =
-        "problem exceeds solver size limit (200 scalar variables / 200 scalar constraint rows)";
+    if problem.domains.is_empty() {
+        solve_continuous(problem)
+    } else {
+        crate::solver_milp::solve_mixed_integer(problem)
+    }
+}
 
-    let mut offsets: HashMap<u64, usize> = HashMap::with_capacity(problem.variables.len());
+/// Size-limit error shared by both the `clarabel` and `microlp` solve
+/// paths (SPEC-0010/SPEC-0019).
+pub(crate) const SIZE_LIMIT_ERROR: &str =
+    "problem exceeds solver size limit (200 scalar variables / 200 scalar constraint rows)";
+
+/// Builds the `cvxrust::Variable::id` -> global scalar offset map, and the
+/// total scalar-variable count `n_total`, shared by both the `clarabel`
+/// and `microlp` solve paths (SPEC-0010/SPEC-0019).
+pub(crate) fn variable_offsets(variables: &[Variable]) -> (HashMap<u64, usize>, usize) {
+    let mut offsets: HashMap<u64, usize> = HashMap::with_capacity(variables.len());
     let mut n_total = 0usize;
-    for v in &problem.variables {
+    for v in variables {
         offsets.insert(v.id, n_total);
         n_total += v.shape.0 * v.shape.1;
     }
+    (offsets, n_total)
+}
+
+/// Attempts to solve `problem` by translating it into a conic program and
+/// delegating to `clarabel`. See the crate-level docs and `SPEC-0010`/
+/// `SPEC-0014` for the supported problem class. Only called when
+/// `problem.domains` is empty; see `solve` above.
+fn solve_continuous(problem: &Problem) -> Solution {
+    let (offsets, n_total) = variable_offsets(&problem.variables);
 
     if n_total > MAX_VARIABLES {
         return error_solution(SIZE_LIMIT_ERROR);

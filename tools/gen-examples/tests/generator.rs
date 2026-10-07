@@ -94,8 +94,8 @@ fn generated_file_names_match_the_expected_set_exactly() {
 
     assert_eq!(
         actual.len(),
-        8,
-        "expected exactly eight generated workbooks"
+        expected.len(),
+        "expected generated workbook count to match the Interface table"
     );
     assert_eq!(
         actual, expected,

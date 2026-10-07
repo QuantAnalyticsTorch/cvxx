@@ -12,6 +12,7 @@ fn non_scalar_variable_is_a_shape_error() {
     // the variable itself is no longer rejected outright (it may still
     // be used, e.g., in constraints).
     let problem = Problem {
+        domains: Vec::new(),
         sense: Sense::Minimize,
         objective: Expression::from_variable(Variable::new(1, (2, 1))),
         constraints: Vec::new(),
@@ -31,6 +32,7 @@ fn non_scalar_parameter_is_a_shape_error() {
     // Same as above, for a bare (2, 1) parameter used directly as the
     // objective (SPEC-0014).
     let problem = Problem {
+        domains: Vec::new(),
         sense: Sense::Minimize,
         objective: Expression::from_parameter(1, (2, 1), vec![1.0, 2.0]),
         constraints: Vec::new(),
@@ -51,6 +53,7 @@ fn solves_a_simple_minimize_problem() {
     let x = scalar_var(1);
     let y = scalar_var(2);
     let problem = Problem {
+        domains: Vec::new(),
         sense: Sense::Minimize,
         objective: Expression::add(Expression::from_variable(x), Expression::from_variable(y)),
         constraints: vec![
@@ -80,6 +83,7 @@ fn solves_the_same_problem_as_a_maximize() {
     let x = scalar_var(1);
     let y = scalar_var(2);
     let problem = Problem {
+        domains: Vec::new(),
         sense: Sense::Maximize,
         objective: Expression::neg(Expression::add(
             Expression::from_variable(x),
@@ -109,6 +113,7 @@ fn solves_a_problem_with_only_equal_constraints() {
     // minimize x subject to x == 5
     let x = scalar_var(1);
     let problem = Problem {
+        domains: Vec::new(),
         sense: Sense::Minimize,
         objective: Expression::from_variable(x),
         constraints: vec![Constraint {
@@ -129,6 +134,7 @@ fn solves_a_problem_with_mixed_constraint_types() {
     let x = scalar_var(1);
     let y = scalar_var(2);
     let problem = Problem {
+        domains: Vec::new(),
         sense: Sense::Minimize,
         objective: Expression::add(Expression::from_variable(x), Expression::from_variable(y)),
         constraints: vec![
@@ -161,6 +167,7 @@ fn reports_infeasible_problems() {
     // x >= 5 and x <= 1 simultaneously
     let x = scalar_var(1);
     let problem = Problem {
+        domains: Vec::new(),
         sense: Sense::Minimize,
         objective: Expression::from_variable(x),
         constraints: vec![
@@ -186,6 +193,7 @@ fn reports_unbounded_problems() {
     // minimize x with no constraints (unbounded below)
     let x = scalar_var(1);
     let problem = Problem {
+        domains: Vec::new(),
         sense: Sense::Minimize,
         objective: Expression::from_variable(x),
         constraints: vec![],
@@ -200,6 +208,7 @@ fn solves_a_problem_with_negative_optimal_x() {
     // minimize x subject to x >= -5 (free variable, no manual splitting needed)
     let x = scalar_var(1);
     let problem = Problem {
+        domains: Vec::new(),
         sense: Sense::Minimize,
         objective: Expression::from_variable(x),
         constraints: vec![Constraint {
@@ -217,6 +226,7 @@ fn solves_a_problem_with_negative_optimal_x() {
 #[test]
 fn solves_a_bare_objective_with_no_constraints() {
     let problem = Problem {
+        domains: Vec::new(),
         sense: Sense::Minimize,
         objective: Expression::constant(42.0),
         constraints: Vec::new(),
@@ -232,6 +242,7 @@ fn solves_a_bare_objective_with_no_constraints() {
 fn exceeding_max_variables_is_a_size_error() {
     let variables: Vec<Variable> = (0..(MAX_VARIABLES as u64 + 1)).map(scalar_var).collect();
     let problem = Problem {
+        domains: Vec::new(),
         sense: Sense::Minimize,
         objective: Expression::constant(0.0),
         constraints: Vec::new(),
@@ -290,6 +301,7 @@ fn solves_a_quadratic_objective() {
     let x_expr = Expression::from_variable(x);
     let y_expr = Expression::from_variable(y);
     let problem = Problem {
+        domains: Vec::new(),
         sense: Sense::Minimize,
         objective: Expression::add(
             Expression::mul(x_expr.clone(), x_expr.clone()),
@@ -317,6 +329,7 @@ fn maximizes_a_concave_quadratic_objective() {
     let x_expr = Expression::from_variable(x);
     let y_expr = Expression::from_variable(y);
     let problem = Problem {
+        domains: Vec::new(),
         sense: Sense::Maximize,
         objective: Expression::neg(Expression::add(
             Expression::mul(x_expr.clone(), x_expr.clone()),
@@ -344,6 +357,7 @@ fn solves_a_quadratic_less_equal_constraint() {
     let x_expr = Expression::from_variable(x);
     let y_expr = Expression::from_variable(y);
     let problem = Problem {
+        domains: Vec::new(),
         sense: Sense::Minimize,
         objective: Expression::neg(Expression::from_variable(x)),
         constraints: vec![Constraint {
@@ -370,6 +384,7 @@ fn solves_a_quadratic_greater_equal_constraint() {
     let x_expr = Expression::from_variable(x);
     let y_expr = Expression::from_variable(y);
     let problem = Problem {
+        domains: Vec::new(),
         sense: Sense::Minimize,
         objective: Expression::neg(Expression::from_variable(x)),
         constraints: vec![Constraint {
@@ -393,6 +408,7 @@ fn quadratic_equality_constraint_is_unsupported() {
     let x = scalar_var(1);
     let x_expr = Expression::from_variable(x);
     let problem = Problem {
+        domains: Vec::new(),
         sense: Sense::Minimize,
         objective: Expression::constant(0.0),
         constraints: vec![Constraint {
@@ -415,6 +431,7 @@ fn indefinite_quadratic_constraint_is_rejected_as_non_convex() {
     let x = scalar_var(1);
     let y = scalar_var(2);
     let problem = Problem {
+        domains: Vec::new(),
         sense: Sense::Minimize,
         objective: Expression::constant(0.0),
         constraints: vec![Constraint {
@@ -440,6 +457,7 @@ fn cubic_term_in_a_constraint_is_a_degree_error() {
     let y = scalar_var(2);
     let x_expr = Expression::from_variable(x);
     let problem = Problem {
+        domains: Vec::new(),
         sense: Sense::Minimize,
         objective: Expression::constant(0.0),
         constraints: vec![Constraint {
@@ -473,6 +491,7 @@ fn feasibility_only_problem_solves_a_boxed_matrix_variable() {
     let m_expr = Expression::from_variable(m);
     let bound = Expression::from_parameter(2, (2, 2), vec![1.0, 2.0, 3.0, 4.0]);
     let problem = Problem {
+        domains: Vec::new(),
         sense: Sense::Minimize,
         objective: Expression::constant(0.0),
         constraints: vec![
@@ -504,6 +523,7 @@ fn feasibility_only_problem_solves_a_boxed_vector_variable() {
     let w_expr = Expression::from_variable(w);
     let bound = Expression::from_parameter(2, (3, 1), vec![1.0, 2.0, 3.0]);
     let problem = Problem {
+        domains: Vec::new(),
         sense: Sense::Minimize,
         objective: Expression::constant(0.0),
         constraints: vec![
@@ -538,6 +558,7 @@ fn mixed_scalar_and_vector_problem_solves_both_independently() {
     let w_expr = Expression::from_variable(w);
     let bound = Expression::from_parameter(3, (3, 1), vec![2.0, 2.0, 2.0]);
     let problem = Problem {
+        domains: Vec::new(),
         sense: Sense::Minimize,
         objective: Expression::from_variable(x),
         constraints: vec![
@@ -572,6 +593,7 @@ fn elementwise_mul_equal_constraint_recovers_expected_values() {
     // 2 .* w == [4, 6, 8] => w == [2, 3, 4]
     let w = Variable::new(1, (3, 1));
     let problem = Problem {
+        domains: Vec::new(),
         sense: Sense::Minimize,
         objective: Expression::constant(0.0),
         constraints: vec![Constraint {
@@ -595,6 +617,7 @@ fn scalar_quadratic_constraint_broadcasts_against_vector_parameter() {
     let x = scalar_var(1);
     let x_expr = Expression::from_variable(x);
     let problem = Problem {
+        domains: Vec::new(),
         sense: Sense::Minimize,
         objective: Expression::neg(x_expr.clone()),
         constraints: vec![Constraint {
@@ -619,6 +642,7 @@ fn budget_allocation_lp_with_sum_solves_the_least_cost_allocation() {
     let cost = Expression::from_parameter(2, (3, 1), vec![3.0, 1.0, 2.0]);
     let zero = Expression::from_parameter(3, (3, 1), vec![0.0, 0.0, 0.0]);
     let problem = Problem {
+        domains: Vec::new(),
         sense: Sense::Minimize,
         objective: Expression::sum(Expression::mul(cost, x_expr.clone())),
         constraints: vec![
@@ -647,6 +671,7 @@ fn bare_vector_objective_is_a_shape_error_but_sum_wrapped_succeeds() {
     let w_expr = Expression::from_variable(w);
 
     let bare_problem = Problem {
+        domains: Vec::new(),
         sense: Sense::Minimize,
         objective: w_expr.clone(),
         constraints: Vec::new(),
@@ -660,6 +685,7 @@ fn bare_vector_objective_is_a_shape_error_but_sum_wrapped_succeeds() {
     );
 
     let summed_problem = Problem {
+        domains: Vec::new(),
         sense: Sense::Minimize,
         objective: Expression::sum(w_expr.clone()),
         constraints: vec![Constraint {
@@ -678,6 +704,7 @@ fn bare_vector_objective_is_a_shape_error_but_sum_wrapped_succeeds() {
 fn single_oversized_vector_variable_is_a_size_error() {
     let w = Variable::new(1, (MAX_VARIABLES + 1, 1));
     let problem = Problem {
+        domains: Vec::new(),
         sense: Sense::Minimize,
         objective: Expression::constant(0.0),
         constraints: Vec::new(),
@@ -703,6 +730,7 @@ fn index_constraint_restricts_only_the_indexed_entry_of_a_larger_variable() {
     let w_expr = Expression::from_variable(w);
     let zero = Expression::from_parameter(2, (3, 1), vec![0.0, 0.0, 0.0]);
     let problem = Problem {
+        domains: Vec::new(),
         sense: Sense::Minimize,
         objective: Expression::sum(w_expr.clone()),
         constraints: vec![
@@ -738,6 +766,7 @@ fn index_constraint_restricts_only_a_sub_block_of_a_matrix_variable() {
     let zero = Expression::from_parameter(2, (2, 2), vec![0.0, 0.0, 0.0, 0.0]);
     let bound = Expression::from_parameter(3, (1, 2), vec![3.0, 4.0]);
     let problem = Problem {
+        domains: Vec::new(),
         sense: Sense::Minimize,
         objective: Expression::sum(m_expr.clone()),
         constraints: vec![
@@ -781,6 +810,7 @@ fn budget_allocation_lp_with_matmul_solves_the_least_cost_allocation() {
     let ones = Expression::from_parameter(3, (1, 3), vec![1.0, 1.0, 1.0]);
     let zero = Expression::from_parameter(4, (3, 1), vec![0.0, 0.0, 0.0]);
     let problem = Problem {
+        domains: Vec::new(),
         sense: Sense::Minimize,
         objective: Expression::matmul(cost, x_expr.clone()),
         constraints: vec![
@@ -817,6 +847,7 @@ fn transpose_lines_up_two_row_shaped_operands_for_a_matmul_dot_product() {
     let ones = Expression::from_parameter(3, (1, 3), vec![1.0, 1.0, 1.0]);
     let zero = Expression::from_parameter(4, (1, 3), vec![0.0, 0.0, 0.0]);
     let problem = Problem {
+        domains: Vec::new(),
         sense: Sense::Minimize,
         objective: Expression::matmul(weights, Expression::transpose(x_expr.clone())),
         constraints: vec![
@@ -854,6 +885,7 @@ fn matmul_constraint_restricts_only_the_selected_combination_of_a_larger_variabl
     let selection = Expression::from_parameter(3, (2, 3), vec![1.0, 0.0, 0.0, 0.0, 1.0, 0.0]);
     let bound = Expression::from_parameter(4, (2, 1), vec![3.0, 4.0]);
     let problem = Problem {
+        domains: Vec::new(),
         sense: Sense::Minimize,
         objective: Expression::sum(x_expr.clone()),
         constraints: vec![
@@ -901,6 +933,7 @@ fn matmul_chained_so_the_variable_appears_on_both_final_sides_solves_a_portfolio
         w_expr.clone(),
     );
     let problem = Problem {
+        domains: Vec::new(),
         sense: Sense::Minimize,
         objective: risk,
         constraints: vec![Constraint {
@@ -932,6 +965,7 @@ fn sum_of_squares_least_squares_problem_solves_the_expected_optimum() {
     let diff = Expression::sub(Expression::matmul(a, x_expr), b);
     let objective = Expression::sum(Expression::mul(diff.clone(), diff));
     let problem = Problem {
+        domains: Vec::new(),
         sense: Sense::Minimize,
         objective,
         constraints: Vec::new(),
@@ -955,6 +989,7 @@ fn quadratic_vector_constraint_from_a_matmul_self_dot_product_restricts_a_unit_b
     let objective = Expression::neg(Expression::sum(x_expr.clone()));
     let unit_ball = Expression::matmul(Expression::transpose(x_expr.clone()), x_expr);
     let problem = Problem {
+        domains: Vec::new(),
         sense: Sense::Minimize,
         objective,
         constraints: vec![Constraint {
@@ -988,6 +1023,7 @@ fn indefinite_matmul_quadratic_constraint_is_rejected_as_non_convex() {
         x_expr,
     );
     let problem = Problem {
+        domains: Vec::new(),
         sense: Sense::Minimize,
         objective: Expression::constant(0.0),
         constraints: vec![Constraint {

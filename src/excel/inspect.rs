@@ -11,8 +11,8 @@ use crate::analytics::{infer_shape, render_expression};
 use crate::core::error::CvxError;
 use crate::core::handle::{format_handle, parse_handle, HandleKind};
 use crate::core::registry::{
-    ConstraintEntry, ConstraintSetEntry, ExpressionEntry, ObjectiveEntry, ParameterEntry,
-    ProblemEntry, Registry, ResultEntry, VariableEntry,
+    ConstraintEntry, ConstraintSetEntry, ConstraintSetItem, DomainEntry, ExpressionEntry,
+    ObjectiveEntry, ParameterEntry, ProblemEntry, Registry, ResultEntry, VariableEntry,
 };
 use crate::data;
 use cvxrust::{Sense, SolveStatus};
@@ -30,6 +30,7 @@ enum RegistryObject {
     Objective(ObjectiveEntry),
     Problem(ProblemEntry),
     Result(ResultEntry),
+    Domain(DomainEntry),
 }
 
 impl RegistryObject {
@@ -43,6 +44,7 @@ impl RegistryObject {
             RegistryObject::Objective(_) => HandleKind::Obj,
             RegistryObject::Problem(_) => HandleKind::Prob,
             RegistryObject::Result(_) => HandleKind::Result,
+            RegistryObject::Domain(_) => HandleKind::Dom,
         }
     }
 
@@ -56,6 +58,7 @@ impl RegistryObject {
             RegistryObject::Objective(e) => e.uuid,
             RegistryObject::Problem(e) => e.uuid,
             RegistryObject::Result(e) => e.uuid,
+            RegistryObject::Domain(e) => e.uuid,
         }
     }
 
@@ -69,6 +72,7 @@ impl RegistryObject {
             RegistryObject::Objective(e) => e.name.as_deref(),
             RegistryObject::Problem(e) => e.name.as_deref(),
             RegistryObject::Result(e) => e.name.as_deref(),
+            RegistryObject::Domain(e) => e.name.as_deref(),
         }
     }
 
@@ -82,6 +86,7 @@ impl RegistryObject {
             RegistryObject::Objective(_) => "objective",
             RegistryObject::Problem(_) => "problem",
             RegistryObject::Result(_) => "result",
+            RegistryObject::Domain(_) => "domain",
         }
     }
 }
@@ -118,6 +123,9 @@ fn resolve_any(text: &str) -> Result<RegistryObject, CvxError> {
             HandleKind::Result => registry
                 .get_result_by_uuid(uuid)
                 .map(RegistryObject::Result),
+            HandleKind::Dom => registry
+                .get_domain_by_uuid(uuid)
+                .map(RegistryObject::Domain),
         };
         return found.ok_or_else(|| CvxError::UnknownIdentifier(text.to_string()));
     }
@@ -147,6 +155,9 @@ fn resolve_any(text: &str) -> Result<RegistryObject, CvxError> {
     if let Some(e) = registry.get_result_by_name(text) {
         matches.push(RegistryObject::Result(e));
     }
+    if let Some(e) = registry.get_domain_by_name(text) {
+        matches.push(RegistryObject::Domain(e));
+    }
 
     resolve_from_matches(text, matches)
 }
@@ -174,6 +185,7 @@ fn status_str(status: &SolveStatus) -> &'static str {
         SolveStatus::Infeasible => "infeasible",
         SolveStatus::Unbounded => "unbounded",
         SolveStatus::Error(_) => "error",
+        SolveStatus::StoppedAtLimit => "stopped_at_limit",
     }
 }
 
@@ -193,7 +205,7 @@ fn primary_identifier(obj: &RegistryObject) -> String {
 /// returns its name (quoted, as in `primary_identifier`) if it has one,
 /// else its handle. Falls back to the handle if the entry has since been
 /// removed from the registry (should not normally occur, since referenced
-/// objects are not independently deletable — see Error Handling).
+/// objects are not independently deletable â€” see Error Handling).
 fn display_ref(kind: HandleKind, uuid: Uuid) -> String {
     let name = match kind {
         HandleKind::Constr => Registry::global()
@@ -205,7 +217,10 @@ fn display_ref(kind: HandleKind, uuid: Uuid) -> String {
         HandleKind::Obj => Registry::global()
             .get_objective_by_uuid(uuid)
             .and_then(|e| e.name),
-        _ => None, // only the three referenced kinds above are ever passed in
+        HandleKind::Dom => Registry::global()
+            .get_domain_by_uuid(uuid)
+            .and_then(|e| e.name),
+        _ => None, // only the referenced kinds above are ever passed in
     };
     match name {
         Some(name) => format!("\"{name}\""),
@@ -267,15 +282,27 @@ fn describe_body(obj: &RegistryObject) -> String {
             )
         }
         RegistryObject::ConstraintSet(e) => {
+            let (constraint_count, domain_count) = (
+                e.items
+                    .iter()
+                    .filter(|i| matches!(i, ConstraintSetItem::Constraint(_)))
+                    .count(),
+                e.items
+                    .iter()
+                    .filter(|i| matches!(i, ConstraintSetItem::Domain(_)))
+                    .count(),
+            );
             let handles = e
-                .constraints
+                .items
                 .iter()
-                .map(|uuid| display_ref(HandleKind::Constr, *uuid))
+                .map(|item| match item {
+                    ConstraintSetItem::Constraint(uuid) => display_ref(HandleKind::Constr, *uuid),
+                    ConstraintSetItem::Domain(uuid) => display_ref(HandleKind::Dom, *uuid),
+                })
                 .collect::<Vec<_>>()
                 .join(", ");
             format!(
-                "constraint_set: [{} constraint(s)]: {handles}",
-                e.constraints.len()
+                "constraint_set: [{constraint_count} constraint(s), {domain_count} domain(s)]: {handles}"
             )
         }
         RegistryObject::Objective(e) => {
@@ -296,6 +323,12 @@ fn describe_body(obj: &RegistryObject) -> String {
                 .map(|uuid| display_ref(HandleKind::Constr, *uuid))
                 .collect::<Vec<_>>()
                 .join(", ");
+            let d_handles = e
+                .domains
+                .iter()
+                .map(|uuid| display_ref(HandleKind::Dom, *uuid))
+                .collect::<Vec<_>>()
+                .join(", ");
             let v_handles = e
                 .variables
                 .iter()
@@ -303,8 +336,9 @@ fn describe_body(obj: &RegistryObject) -> String {
                 .collect::<Vec<_>>()
                 .join(", ");
             format!(
-                "problem: objective={obj_handle}, constraints=[{}]: {c_handles}, variables=[{}]: {v_handles}",
+                "problem: objective={obj_handle}, constraints=[{}]: {c_handles}, domains=[{}]: {d_handles}, variables=[{}]: {v_handles}",
                 e.constraints.len(),
+                e.domains.len(),
                 e.variables.len()
             )
         }
@@ -317,6 +351,33 @@ fn describe_body(obj: &RegistryObject) -> String {
                 "result: status={}, objective_value={ov}, variables=[{}]",
                 status_str(&e.status),
                 e.variable_values.len()
+            )
+        }
+        RegistryObject::Domain(e) => {
+            let domain_str = match e.domain.domain {
+                cvxrust::Domain::Integer => "integer",
+                cvxrust::Domain::Binary => "binary",
+            };
+            let variable_expr = cvxrust::Expression::from_variable(e.domain.variable);
+            let (var_rows, var_cols) = e.domain.variable.shape;
+            let target = if e.domain.row_start == 0
+                && e.domain.col_start == 0
+                && e.domain.rows == var_rows
+                && e.domain.cols == var_cols
+            {
+                variable_expr
+            } else {
+                cvxrust::Expression::index(
+                    variable_expr,
+                    e.domain.row_start,
+                    e.domain.col_start,
+                    e.domain.rows,
+                    e.domain.cols,
+                )
+            };
+            format!(
+                "domain {domain_str}: {}",
+                render_expression(&target, Registry::global())
             )
         }
     }
@@ -345,7 +406,7 @@ fn shape_str(obj: &RegistryObject) -> Result<String, CvxError> {
     }
 }
 
-/// `CVX.DESCRIBE(handle)` — describes any registry object as a diagnostic
+/// `CVX.DESCRIBE(handle)` â€” describes any registry object as a diagnostic
 /// string.
 #[export_name = "CVX.DESCRIBE"]
 pub extern "system" fn cvx_describe(handle: LPXLOPER12) -> LPXLOPER12 {
@@ -353,7 +414,7 @@ pub extern "system" fn cvx_describe(handle: LPXLOPER12) -> LPXLOPER12 {
     to_xloper_err_string_result(result, "CVX.DESCRIBE")
 }
 
-/// `CVX.SHAPE(handle)` — returns the `"<rows>x<cols>"` shape of a
+/// `CVX.SHAPE(handle)` â€” returns the `"<rows>x<cols>"` shape of a
 /// parameter, variable, or expression.
 #[export_name = "CVX.SHAPE"]
 pub extern "system" fn cvx_shape(handle: LPXLOPER12) -> LPXLOPER12 {
@@ -361,7 +422,7 @@ pub extern "system" fn cvx_shape(handle: LPXLOPER12) -> LPXLOPER12 {
     to_xloper_err_string_result(result, "CVX.SHAPE")
 }
 
-/// `CVX.TYPE(handle)` — returns the type name of any registry object.
+/// `CVX.TYPE(handle)` â€” returns the type name of any registry object.
 #[export_name = "CVX.TYPE"]
 pub extern "system" fn cvx_type(handle: LPXLOPER12) -> LPXLOPER12 {
     let result = run_handle(handle, |obj| Ok(obj.type_str().to_string()));
@@ -388,7 +449,7 @@ fn to_xloper_err_string_result(result: Result<String, CvxError>, context: &str) 
     Box::into_raw(Box::new(variant)) as LPXLOPER12
 }
 
-/// `CVX.STATUS(result)` — returns the solve status of a result as a string.
+/// `CVX.STATUS(result)` â€” returns the solve status of a result as a string.
 #[export_name = "CVX.STATUS"]
 pub extern "system" fn cvx_status(result: LPXLOPER12) -> LPXLOPER12 {
     to_xloper_err_string_result(run_status(result), "CVX.STATUS")
@@ -406,7 +467,7 @@ fn status_for(result_uuid: Uuid) -> Result<String, CvxError> {
     Ok(status_str(&entry.status).to_string())
 }
 
-/// `CVX.OBJECTIVE_VALUE(result)` — returns the objective value of an
+/// `CVX.OBJECTIVE_VALUE(result)` â€” returns the objective value of an
 /// optimal result.
 #[export_name = "CVX.OBJECTIVE_VALUE"]
 pub extern "system" fn cvx_objective_value(result: LPXLOPER12) -> LPXLOPER12 {
@@ -437,7 +498,7 @@ fn objective_value_for(result_uuid: Uuid) -> Result<f64, CvxError> {
     })
 }
 
-/// `CVX.VALUE(result, variable)` — returns a solved variable's value(s):
+/// `CVX.VALUE(result, variable)` â€” returns a solved variable's value(s):
 /// a scalar for a `(1, 1)` variable, an array otherwise.
 #[export_name = "CVX.VALUE"]
 pub extern "system" fn cvx_value(result: LPXLOPER12, variable: LPXLOPER12) -> LPXLOPER12 {
@@ -466,7 +527,10 @@ fn value_for(
         .get_variable_by_uuid(variable_uuid)
         .ok_or_else(|| CvxError::Registry("variable disappeared".to_string()))?;
 
-    if result_entry.status != SolveStatus::Optimal {
+    if !matches!(
+        result_entry.status,
+        SolveStatus::Optimal | SolveStatus::StoppedAtLimit
+    ) {
         return Err(CvxError::InvalidExpression(format!(
             "result status is {}; no variable values are available",
             status_str(&result_entry.status)
@@ -581,7 +645,10 @@ mod tests {
             .unwrap();
         let (_, constr_uuid) = parse_handle(&constr).unwrap();
         let constrset = registry
-            .insert_constraint_set(Some("inspect_constrset".to_string()), vec![constr_uuid])
+            .insert_constraint_set(
+                Some("inspect_constrset".to_string()),
+                vec![ConstraintSetItem::Constraint(constr_uuid)],
+            )
             .unwrap();
         let objective = registry
             .insert_objective(
@@ -597,6 +664,7 @@ mod tests {
                 Some("inspect_prob".to_string()),
                 objective_uuid,
                 vec![constr_uuid],
+                vec![],
                 vec![variable_entry.uuid],
             )
             .unwrap();
@@ -760,13 +828,19 @@ mod tests {
         let (_, named_uuid) = parse_handle(&named_constr).unwrap();
         let (_, unnamed_uuid) = parse_handle(&unnamed_constr).unwrap();
         let set_handle = Registry::global()
-            .insert_constraint_set(None, vec![named_uuid, unnamed_uuid])
+            .insert_constraint_set(
+                None,
+                vec![
+                    ConstraintSetItem::Constraint(named_uuid),
+                    ConstraintSetItem::Constraint(unnamed_uuid),
+                ],
+            )
             .unwrap();
         let obj = resolve_any(&set_handle).unwrap();
         assert_eq!(
             describe(&obj),
             format!(
-                "{set_handle}: constraint_set: [2 constraint(s)]: \"named_constr\", {unnamed_constr}"
+                "{set_handle}: constraint_set: [2 constraint(s), 0 domain(s)]: \"named_constr\", {unnamed_constr}"
             )
         );
     }
@@ -801,6 +875,7 @@ mod tests {
                 None,
                 objective_uuid,
                 vec![constr_uuid],
+                vec![],
                 vec![variable_entry.uuid],
             )
             .unwrap();
@@ -808,7 +883,7 @@ mod tests {
         assert_eq!(
             describe(&obj),
             format!(
-                "{problem}: problem: objective=\"named_objective\", constraints=[1]: {constr}, variables=[1]: {var}"
+                "{problem}: problem: objective=\"named_objective\", constraints=[1]: {constr}, domains=[0]: , variables=[1]: {var}"
             )
         );
     }
@@ -948,7 +1023,7 @@ mod tests {
             .unwrap();
         let (_, objective_uuid) = parse_handle(&objective).unwrap();
         let problem = Registry::global()
-            .insert_problem(None, objective_uuid, vec![], vec![])
+            .insert_problem(None, objective_uuid, vec![], vec![], vec![])
             .unwrap();
         let (_, problem_uuid) = parse_handle(&problem).unwrap();
         let result = Registry::global()
@@ -972,7 +1047,7 @@ mod tests {
             .unwrap();
         let (_, objective_uuid) = parse_handle(&objective).unwrap();
         let problem = Registry::global()
-            .insert_problem(None, objective_uuid, vec![], vec![])
+            .insert_problem(None, objective_uuid, vec![], vec![], vec![])
             .unwrap();
         let (_, problem_uuid) = parse_handle(&problem).unwrap();
         let result = Registry::global()
@@ -1010,6 +1085,7 @@ mod tests {
             .insert_problem(
                 None,
                 objective_uuid,
+                vec![],
                 vec![],
                 vec![var_scalar_uuid, var_array_uuid],
             )
@@ -1053,7 +1129,7 @@ mod tests {
             .unwrap();
         let (_, objective_uuid) = parse_handle(&objective).unwrap();
         let problem = Registry::global()
-            .insert_problem(None, objective_uuid, vec![], vec![solved_var_uuid])
+            .insert_problem(None, objective_uuid, vec![], vec![], vec![solved_var_uuid])
             .unwrap();
         let (_, problem_uuid) = parse_handle(&problem).unwrap();
 
@@ -1085,7 +1161,7 @@ mod tests {
             .unwrap();
         let (_, objective_uuid) = parse_handle(&objective).unwrap();
         let problem = Registry::global()
-            .insert_problem(None, objective_uuid, vec![], vec![var_uuid])
+            .insert_problem(None, objective_uuid, vec![], vec![], vec![var_uuid])
             .unwrap();
         let (_, problem_uuid) = parse_handle(&problem).unwrap();
 

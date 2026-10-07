@@ -10,7 +10,7 @@ use crate::analytics::parser;
 use crate::analytics::resolve::resolve_constraint;
 use crate::core::error::CvxError;
 use crate::core::handle::{parse_handle, HandleKind};
-use crate::core::registry::Registry;
+use crate::core::registry::{ConstraintSetItem, Registry};
 use crate::data;
 use crate::excel::expression::{resolve_handle_arg, to_xloper_result};
 use cvxrust::Expression;
@@ -118,16 +118,27 @@ fn run_constraints(constraints: LPXLOPER12, name: LPXLOPER12) -> Result<String, 
     let entries = data::parse_optional_string_range(&range)?;
     let name = data::parse_optional_name(&Variant::from_xloper(name))?;
 
-    let mut uuids = Vec::new();
+    let mut items = Vec::new();
     for entry in entries.into_iter().flatten() {
-        uuids.push(resolve_constraint_uuid(&entry)?);
+        items.push(resolve_constraint_set_item(&entry)?);
     }
 
-    if uuids.is_empty() {
+    if items.is_empty() {
         return Err(CvxError::EmptyRange);
     }
 
-    Registry::global().insert_constraint_set(name, uuids)
+    Registry::global().insert_constraint_set(name, items)
+}
+
+/// Resolves a `CVX.CONSTRAINTS` member reference, which may name/handle
+/// either an ordinary constraint or an integer/binary domain restriction
+/// (SPEC-0019). Tries the constraint table first, then falls back to the
+/// domain table.
+pub(crate) fn resolve_constraint_set_item(text: &str) -> Result<ConstraintSetItem, CvxError> {
+    if let Ok(uuid) = resolve_constraint_uuid(text) {
+        return Ok(ConstraintSetItem::Constraint(uuid));
+    }
+    crate::excel::domain::resolve_domain_uuid(text).map(ConstraintSetItem::Domain)
 }
 
 pub(crate) fn resolve_constraint_uuid(text: &str) -> Result<Uuid, CvxError> {

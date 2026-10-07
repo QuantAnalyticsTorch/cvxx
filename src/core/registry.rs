@@ -9,7 +9,7 @@ use crate::analytics::ast::Relation;
 use crate::core::error::CvxError;
 use crate::core::handle::{format_handle, HandleKind};
 use crate::core::variable::Variable;
-use cvxrust::{Expression, Sense, SolveStatus};
+use cvxrust::{DomainConstraint, Expression, Sense, SolveStatus};
 
 /// A parameter stored in the registry: dense numeric data keyed by UUID and
 /// an optional unique name.
@@ -58,15 +58,34 @@ pub struct ConstraintEntry {
     pub dependencies: Vec<String>,
 }
 
-/// An ordered set of constraints stored in the registry, keyed by UUID and
-/// an optional unique name.
+/// An integer/binary domain restriction over a rectangular sub-block of a
+/// variable's scalar entries, stored in the registry, keyed by UUID and an
+/// optional unique name (SPEC-0019).
+#[derive(Debug, Clone, PartialEq)]
+pub struct DomainEntry {
+    pub uuid: Uuid,
+    pub name: Option<String>,
+    pub domain: DomainConstraint,
+}
+
+/// One member of a constraint set: either an ordinary constraint or an
+/// integer/binary domain restriction (SPEC-0019). `CVX.PROBLEM` splits a
+/// resolved set back into its `constraints`/`domains` buckets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConstraintSetItem {
+    Constraint(Uuid),
+    Domain(Uuid),
+}
+
+/// An ordered set of constraints and/or domain restrictions stored in the
+/// registry, keyed by UUID and an optional unique name.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ConstraintSetEntry {
     pub uuid: Uuid,
     pub name: Option<String>,
-    /// Ordered UUIDs of the member constraints, referencing the constraint
-    /// table.
-    pub constraints: Vec<Uuid>,
+    /// Ordered members of the set, each referencing either the constraint
+    /// table or the domain table (SPEC-0019).
+    pub items: Vec<ConstraintSetItem>,
 }
 
 /// An objective stored in the registry: a sense paired with a lazy
@@ -91,10 +110,14 @@ pub struct ProblemEntry {
     pub objective: Uuid,
     /// Ordered `ConstraintEntry` references; may be empty.
     pub constraints: Vec<Uuid>,
+    /// Ordered `DomainEntry` references; may be empty (SPEC-0019). Empty
+    /// for every problem with no integer/binary restrictions, which routes
+    /// `cvxrust::solve` through the unchanged continuous path.
+    pub domains: Vec<Uuid>,
     /// Distinct variable UUIDs referenced (directly or transitively) by the
-    /// objective and constraints, in first-seen order. Positionally aligned
-    /// with the `variables` field of the `cvxrust::Problem` passed to
-    /// `cvxrust::solve`.
+    /// objective, constraints, and domain restrictions, in first-seen
+    /// order. Positionally aligned with the `variables` field of the
+    /// `cvxrust::Problem` passed to `cvxrust::solve`.
     pub variables: Vec<Uuid>,
 }
 
@@ -183,6 +206,7 @@ pub struct Registry {
     objectives: RwLock<RegistryTable<ObjectiveEntry>>,
     problems: RwLock<RegistryTable<ProblemEntry>>,
     results: RwLock<RegistryTable<ResultEntry>>,
+    domains: RwLock<RegistryTable<DomainEntry>>,
 }
 
 impl Registry {
@@ -196,6 +220,7 @@ impl Registry {
             objectives: RwLock::new(RegistryTable::new()),
             problems: RwLock::new(RegistryTable::new()),
             results: RwLock::new(RegistryTable::new()),
+            domains: RwLock::new(RegistryTable::new()),
         }
     }
 
@@ -236,6 +261,7 @@ impl Registry {
         check_table!(objectives, HandleKind::Obj);
         check_table!(problems, HandleKind::Prob);
         check_table!(results, HandleKind::Result);
+        check_table!(domains, HandleKind::Dom);
 
         Ok(())
     }
@@ -460,13 +486,14 @@ impl Registry {
         self.constraints.read().ok()?.get_by_name(name)
     }
 
-    /// Combines an ordered list of constraint UUIDs into a constraint set.
-    /// If a name is reused, the old entry is overwritten so editing and
-    /// recalculating Excel formulas is convenient.
+    /// Combines an ordered list of constraint and/or domain items
+    /// (SPEC-0019) into a constraint set. If a name is reused, the old
+    /// entry is overwritten so editing and recalculating Excel formulas is
+    /// convenient.
     pub fn insert_constraint_set(
         &self,
         name: Option<String>,
-        constraints: Vec<Uuid>,
+        items: Vec<ConstraintSetItem>,
     ) -> Result<String, CvxError> {
         if let Some(n) = &name {
             self.check_name_available(n, HandleKind::ConstrSet)?;
@@ -483,7 +510,7 @@ impl Registry {
         let entry = ConstraintSetEntry {
             uuid,
             name: entry_name,
-            constraints,
+            items,
         };
 
         if let Some(old_name) = &name {
@@ -561,6 +588,7 @@ impl Registry {
         name: Option<String>,
         objective: Uuid,
         constraints: Vec<Uuid>,
+        domains: Vec<Uuid>,
         variables: Vec<Uuid>,
     ) -> Result<String, CvxError> {
         if let Some(n) = &name {
@@ -580,6 +608,7 @@ impl Registry {
             name: entry_name,
             objective,
             constraints,
+            domains,
             variables,
         };
 
@@ -600,6 +629,51 @@ impl Registry {
 
     pub fn get_problem_by_name(&self, name: &str) -> Option<ProblemEntry> {
         self.problems.read().ok()?.get_by_name(name)
+    }
+
+    /// Inserts an integer/binary domain restriction (SPEC-0019). If a name
+    /// is reused, the old entry is overwritten so editing and
+    /// recalculating Excel formulas is convenient.
+    pub fn insert_domain(
+        &self,
+        name: Option<String>,
+        domain: DomainConstraint,
+    ) -> Result<String, CvxError> {
+        if let Some(n) = &name {
+            self.check_name_available(n, HandleKind::Dom)?;
+        }
+
+        let entry_name = name.clone();
+
+        let mut table = self
+            .domains
+            .write()
+            .map_err(|_| CvxError::Registry("registry lock poisoned".to_string()))?;
+
+        let uuid = Uuid::new_v4();
+        let entry = DomainEntry {
+            uuid,
+            name: entry_name,
+            domain,
+        };
+
+        if let Some(old_name) = &name {
+            if let Some(old) = table.by_name.get(old_name).copied() {
+                table.by_uuid.remove(&old);
+            }
+            table.by_name.insert(old_name.clone(), uuid);
+        }
+
+        table.by_uuid.insert(uuid, entry);
+        Ok(format_handle(HandleKind::Dom, uuid))
+    }
+
+    pub fn get_domain_by_uuid(&self, uuid: Uuid) -> Option<DomainEntry> {
+        self.domains.read().ok()?.get_by_uuid(uuid)
+    }
+
+    pub fn get_domain_by_name(&self, name: &str) -> Option<DomainEntry> {
+        self.domains.read().ok()?.get_by_name(name)
     }
 
     /// Inserts a solver result. If a name is reused, the old entry is
@@ -1001,19 +1075,25 @@ mod tests {
         let (_, c1_uuid) = crate::core::handle::parse_handle(&c1).unwrap();
 
         let handle = registry
-            .insert_constraint_set(Some("cs".to_string()), vec![c1_uuid])
+            .insert_constraint_set(
+                Some("cs".to_string()),
+                vec![ConstraintSetItem::Constraint(c1_uuid)],
+            )
             .unwrap();
         let (kind, uuid) = crate::core::handle::parse_handle(&handle).unwrap();
         assert_eq!(kind, HandleKind::ConstrSet);
         let entry = registry.get_constraint_set_by_uuid(uuid).unwrap();
-        assert_eq!(entry.constraints, vec![c1_uuid]);
+        assert_eq!(entry.items, vec![ConstraintSetItem::Constraint(c1_uuid)]);
     }
 
     #[test]
     fn inserts_and_looks_up_constraint_set_by_name() {
         let registry = Registry::new();
         registry
-            .insert_constraint_set(Some("cs".to_string()), vec![Uuid::new_v4()])
+            .insert_constraint_set(
+                Some("cs".to_string()),
+                vec![ConstraintSetItem::Constraint(Uuid::new_v4())],
+            )
             .unwrap();
         assert!(registry.get_constraint_set_by_name("cs").is_some());
     }
@@ -1022,17 +1102,26 @@ mod tests {
     fn overwrites_named_constraint_set_with_same_name() {
         let registry = Registry::new();
         let first = registry
-            .insert_constraint_set(Some("cs".to_string()), vec![Uuid::new_v4()])
+            .insert_constraint_set(
+                Some("cs".to_string()),
+                vec![ConstraintSetItem::Constraint(Uuid::new_v4())],
+            )
             .unwrap();
         let second_uuid = Uuid::new_v4();
         let second = registry
-            .insert_constraint_set(Some("cs".to_string()), vec![second_uuid])
+            .insert_constraint_set(
+                Some("cs".to_string()),
+                vec![ConstraintSetItem::Constraint(second_uuid)],
+            )
             .unwrap();
         assert_ne!(first, second);
 
         let (_, first_uuid) = crate::core::handle::parse_handle(&first).unwrap();
         let entry = registry.get_constraint_set_by_name("cs").unwrap();
-        assert_eq!(entry.constraints, vec![second_uuid]);
+        assert_eq!(
+            entry.items,
+            vec![ConstraintSetItem::Constraint(second_uuid)]
+        );
         assert!(registry.get_constraint_set_by_uuid(first_uuid).is_none());
     }
 
@@ -1107,6 +1196,7 @@ mod tests {
                 Some("p".to_string()),
                 objective,
                 vec![constraint],
+                vec![],
                 vec![variable],
             )
             .unwrap();
@@ -1122,7 +1212,13 @@ mod tests {
     fn inserts_and_looks_up_problem_by_name() {
         let registry = Registry::new();
         registry
-            .insert_problem(Some("p".to_string()), Uuid::new_v4(), vec![], vec![])
+            .insert_problem(
+                Some("p".to_string()),
+                Uuid::new_v4(),
+                vec![],
+                vec![],
+                vec![],
+            )
             .unwrap();
         assert!(registry.get_problem_by_name("p").is_some());
     }
@@ -1131,10 +1227,22 @@ mod tests {
     fn overwrites_named_problem_with_same_name() {
         let registry = Registry::new();
         let first = registry
-            .insert_problem(Some("p".to_string()), Uuid::new_v4(), vec![], vec![])
+            .insert_problem(
+                Some("p".to_string()),
+                Uuid::new_v4(),
+                vec![],
+                vec![],
+                vec![],
+            )
             .unwrap();
         let second = registry
-            .insert_problem(Some("p".to_string()), Uuid::new_v4(), vec![], vec![])
+            .insert_problem(
+                Some("p".to_string()),
+                Uuid::new_v4(),
+                vec![],
+                vec![],
+                vec![],
+            )
             .unwrap();
         assert_ne!(first, second);
 
@@ -1321,7 +1429,13 @@ mod tests {
             )
             .unwrap();
         let err = registry
-            .insert_problem(Some("x".to_string()), Uuid::new_v4(), vec![], vec![])
+            .insert_problem(
+                Some("x".to_string()),
+                Uuid::new_v4(),
+                vec![],
+                vec![],
+                vec![],
+            )
             .unwrap_err();
         assert_eq!(err, CvxError::AmbiguousIdentifier("x".to_string()));
     }
@@ -1330,7 +1444,13 @@ mod tests {
     fn problem_then_result_with_same_name_is_ambiguous() {
         let registry = Registry::new();
         registry
-            .insert_problem(Some("x".to_string()), Uuid::new_v4(), vec![], vec![])
+            .insert_problem(
+                Some("x".to_string()),
+                Uuid::new_v4(),
+                vec![],
+                vec![],
+                vec![],
+            )
             .unwrap();
         let err = registry
             .insert_result(
@@ -1348,7 +1468,10 @@ mod tests {
     fn constraint_set_then_parameter_with_same_name_is_ambiguous() {
         let registry = Registry::new();
         registry
-            .insert_constraint_set(Some("x".to_string()), vec![Uuid::new_v4()])
+            .insert_constraint_set(
+                Some("x".to_string()),
+                vec![ConstraintSetItem::Constraint(Uuid::new_v4())],
+            )
             .unwrap();
         let err = registry
             .insert_parameter(Some("x".to_string()), (1, 1), vec![1.0])

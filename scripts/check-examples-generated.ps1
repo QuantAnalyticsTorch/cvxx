@@ -1,15 +1,16 @@
 <#
 .SYNOPSIS
-    Checks that docs/examples/ contains exactly the eight workbooks
+    Checks that docs/examples/ contains exactly the nine workbooks
     produced by `gen-examples` and does not contain the retired,
     hand-built Introduction.xlsx.
 
 .DESCRIPTION
     SPEC-0017 replaces the single hand-maintained docs/examples/Introduction.xlsx
-    with eight generated workbooks (00-overview.xlsx through
-    07-inspecting-results.xlsx). Running `cargo run -p gen-examples` can
-    silently produce zero files if it panics before writing anything, or
-    leave a stale Introduction.xlsx behind from before this spec; this
+    with generated workbooks (00-overview.xlsx through
+    07-inspecting-results.xlsx); SPEC-0019 adds a ninth,
+    08-mixed-integer-programming.xlsx. Running `cargo run -p gen-examples`
+    can silently produce zero files if it panics before writing anything,
+    or leave a stale Introduction.xlsx behind from before this spec; this
     script gives CI a concrete, scriptable check for both failure modes.
     Run this after `cargo run -p gen-examples --release -- --out docs/examples`.
 
@@ -34,7 +35,8 @@ $ExpectedFiles = @(
     '04-problems-and-solving.xlsx',
     '05-quadratic-problems.xlsx',
     '06-vector-matrix-indexing.xlsx',
-    '07-inspecting-results.xlsx'
+    '07-inspecting-results.xlsx',
+    '08-mixed-integer-programming.xlsx'
 )
 
 if (-not (Test-Path -LiteralPath $ExamplesRoot -PathType Container)) {
@@ -56,7 +58,7 @@ foreach ($expected in $ExpectedFiles) {
 
 foreach ($actual in $actualFiles) {
     if ($ExpectedFiles -notcontains $actual) {
-        Write-Error "docs/examples contains unexpected file '$actual' (expected exactly the eight generated workbooks)."
+        Write-Error "docs/examples contains unexpected file '$actual' (expected exactly the nine generated workbooks)."
         $hasError = $true
     }
 }
@@ -79,4 +81,4 @@ if ($hasError) {
     exit 1
 }
 
-Write-Host "docs/examples/ contains exactly the eight expected generated workbooks."
+Write-Host "docs/examples/ contains exactly the nine expected generated workbooks."

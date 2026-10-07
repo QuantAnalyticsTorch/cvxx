@@ -14,6 +14,9 @@ pub enum HandleKind {
     Obj,
     Prob,
     Result,
+    /// An integer/binary domain restriction created by `CVX.INTEGER`/
+    /// `CVX.BINARY` (SPEC-0019).
+    Dom,
 }
 
 impl HandleKind {
@@ -27,6 +30,7 @@ impl HandleKind {
             HandleKind::Obj => "obj",
             HandleKind::Prob => "prob",
             HandleKind::Result => "result",
+            HandleKind::Dom => "dom",
         }
     }
 }
@@ -57,6 +61,7 @@ pub fn parse_handle(handle: &str) -> Result<(HandleKind, Uuid), CvxError> {
         "obj" => HandleKind::Obj,
         "prob" => HandleKind::Prob,
         "result" => HandleKind::Result,
+        "dom" => HandleKind::Dom,
         _ => return Err(CvxError::InvalidHandle(handle.to_string())),
     };
 
@@ -122,6 +127,13 @@ mod tests {
         let id = Uuid::new_v4();
         let handle = format_handle(HandleKind::Result, id);
         assert_eq!(parse_handle(&handle).unwrap(), (HandleKind::Result, id));
+    }
+
+    #[test]
+    fn round_trips_a_domain_handle() {
+        let id = Uuid::new_v4();
+        let handle = format_handle(HandleKind::Dom, id);
+        assert_eq!(parse_handle(&handle).unwrap(), (HandleKind::Dom, id));
     }
 
     #[test]

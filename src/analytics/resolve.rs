@@ -223,7 +223,8 @@ impl<'a> Resolver<'a> {
             | HandleKind::ConstrSet
             | HandleKind::Obj
             | HandleKind::Prob
-            | HandleKind::Result => Err(CvxError::UnknownIdentifier(handle.to_string())),
+            | HandleKind::Result
+            | HandleKind::Dom => Err(CvxError::UnknownIdentifier(handle.to_string())),
         }
     }
 }

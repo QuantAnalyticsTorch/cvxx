@@ -23,14 +23,18 @@ Returns:
 
 - `CVX.VALUE`: a single numeric cell for a `(1, 1)` variable, otherwise a
   `rows x cols` array of numeric cells, row-major.
-- `CVX.STATUS`: `"optimal"`, `"infeasible"`, or `"unbounded"`.
+- `CVX.STATUS`: `"optimal"`, `"infeasible"`, `"unbounded"`, or
+  `"stopped_at_limit"` (a mixed-integer solve, see
+  [problems.md](problems.md), that was stopped by its time/node limit
+  after finding a feasible solution but before proving it optimal).
 - `CVX.OBJECTIVE_VALUE`: a numeric cell.
 
 ### Error conditions
 
 - Unknown/wrong-kind `result` or `variable` handles/names return `#VALUE!`.
-- `CVX.VALUE`/`CVX.OBJECTIVE_VALUE` on a non-`Optimal` result return
-  `#VALUE!` (no variable values or objective value are stored).
+- `CVX.VALUE`/`CVX.OBJECTIVE_VALUE` succeed for both `Optimal` and
+  `StoppedAtLimit` results; on an `Infeasible`/`Unbounded` result they
+  return `#VALUE!` (no variable values or objective value are stored).
 - `CVX.VALUE` for a variable that was not part of the solved problem
   returns `#VALUE!`.
 
@@ -45,8 +49,8 @@ Returns:
 ```
 
 - `handle`: a handle or registered name of **any** kind — parameter,
-  variable, expression, constraint, constraint set, objective, problem, or
-  result.
+  variable, expression, constraint, constraint set, objective, problem,
+  domain, or result.
 
 Returns:
 
@@ -66,20 +70,26 @@ Returns:
   for example, `"v"[2, 1]` or `"M"[1:2, 1:3]`. A `CVX.MATMUL`/`@`-built
   expression is shown as `(<left>) @ (<right>)`, and a `CVX.TRANSPOSE`/
   `.T`-built expression as `(<operand>).T` — for example,
-  `"weights" @ "x"` renders as `("weights") @ ("x")`.
+  `"weights" @ "x"` renders as `("weights") @ ("x")`. A domain restriction
+  (from `CVX.INTEGER`/`CVX.BINARY`) is shown as `domain integer: <target>`
+  or `domain binary: <target>`, reusing the same `CVX.INDEX` rendering for
+  `<target>` — for example, `"x_int" (cvx:dom:...): domain integer: "x"`
+  for a whole-variable restriction named `x_int` over a variable named
+  `x`, or `domain binary: "x"[2:3, 1]` for an unnamed sub-block
+  restriction.
 - `CVX.SHAPE`: `"<rows>x<cols>"`, only for parameters, variables, and
   expressions (an expression's shape is inferred from its structure).
 - `CVX.TYPE`: one of `"parameter"`, `"variable"`, `"expression"`,
   `"constraint"`, `"constraint_set"`, `"objective"`, `"problem"`,
-  `"result"`.
+  `"domain"`, `"result"`.
 
 ### Error conditions
 
 - Unknown handle/name → `#VALUE!`.
 - A name that matches more than one registry table → `#VALUE!` (should not
   normally occur — see "Cross-table name uniqueness" below).
-- `CVX.SHAPE` on a constraint, constraint set, objective, problem, or
-  result → `#VALUE!` (those object kinds have no shape).
+- `CVX.SHAPE` on a constraint, constraint set, objective, problem, domain,
+  or result → `#VALUE!` (those object kinds have no shape).
 - `CVX.SHAPE` on an expression whose shape cannot be inferred (a genuine
   shape mismatch between non-scalar operands, an incompatible
   `CVX.MATMUL`/`@` pair, or a `CVX.INDEX`/`index(...)` selection that
